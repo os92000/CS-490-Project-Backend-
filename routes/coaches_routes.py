@@ -1,8 +1,68 @@
+from datetime import time
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, User, UserProfile, CoachSurvey, CoachSpecialization, Specialization, CoachAvailability, CoachPricing, ClientRequest, CoachRelationship, Review
 from utils.helpers import success_response, error_response
 from sqlalchemy import func, or_
+
+
+def _parse_time_hhmm(value):
+    """Parse 'HH:MM' or 'H:MM' into datetime.time; None if invalid."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split(':')
+    if len(parts) < 2:
+        return None
+    try:
+        h, m = int(parts[0]), int(parts[1])
+        if h < 0 or h > 23 or m < 0 or m > 59:
+            return None
+        return time(h, m)
+    except (TypeError, ValueError):
+        return None
+
+
+def _availability_slots_valid(slots):
+    """
+    Validate list of {day_of_week, start_time, end_time} dicts (times as time objects).
+    Returns (True, None) or (False, error_message).
+    """
+    if not isinstance(slots, list):
+        return False, 'slots must be a list'
+    if len(slots) > 64:
+        return False, 'Too many availability rows (max 64)'
+
+    by_day = {}
+    for i, raw in enumerate(slots):
+        if not isinstance(raw, dict):
+            return False, f'Invalid slot at index {i}'
+        dow = raw.get('day_of_week')
+        if dow is None:
+            return False, f'day_of_week required for slot {i}'
+        try:
+            dow = int(dow)
+        except (TypeError, ValueError):
+            return False, f'day_of_week must be an integer for slot {i}'
+        if dow < 0 or dow > 6:
+            return False, f'day_of_week must be 0–6 (Mon–Sun) for slot {i}'
+
+        st = _parse_time_hhmm(raw.get('start_time'))
+        et = _parse_time_hhmm(raw.get('end_time'))
+        if st is None or et is None:
+            return False, f'Invalid start_time or end_time for slot {i} (use HH:MM)'
+        if st >= et:
+            return False, f'End time must be after start time for slot {i}'
+
+        by_day.setdefault(dow, []).append((st, et))
+
+    for dow, intervals in by_day.items():
+        intervals.sort(key=lambda x: x[0])
+        for j in range(len(intervals) - 1):
+            if intervals[j][1] > intervals[j + 1][0]:
+                return False, 'Overlapping time slots on the same day'
+    return True, None
 
 coaches_bp = Blueprint('coaches', __name__, url_prefix='/api/coaches')
 
@@ -483,6 +543,79 @@ def get_my_coach():
         return error_response('Failed to retrieve coach', 500, str(e))
 
 
+@coaches_bp.route('/me/availability', methods=['GET'])
+@jwt_required()
+def get_my_availability():
+    """Coach: list own weekly availability (UC 3.4)."""
+    try:
+        coach_id = int(get_jwt_identity())
+        user = User.query.get(coach_id)
+        if not user or user.role not in ('coach', 'both'):
+            return error_response('Only coaches can manage availability', 403)
+
+        rows = CoachAvailability.query.filter_by(coach_id=coach_id).order_by(
+            CoachAvailability.day_of_week,
+            CoachAvailability.start_time
+        ).all()
+        return success_response(
+            {'slots': [r.to_dict() for r in rows]},
+            'Availability retrieved successfully',
+            200,
+        )
+    except Exception as e:
+        return error_response('Failed to retrieve availability', 500, str(e))
+
+
+@coaches_bp.route('/me/availability', methods=['PUT'])
+@jwt_required()
+def replace_my_availability():
+    """
+    Coach: replace all availability slots (UC 3.4).
+    PUT /api/coaches/me/availability
+    Body: { "slots": [ { "day_of_week": 0-6, "start_time": "HH:MM", "end_time": "HH:MM" }, ... ] }
+    """
+    try:
+        coach_id = int(get_jwt_identity())
+        user = User.query.get(coach_id)
+        if not user or user.role not in ('coach', 'both'):
+            return error_response('Only coaches can manage availability', 403)
+
+        data = request.get_json()
+        if not data or 'slots' not in data:
+            return error_response('Request must include a slots array', 400)
+
+        slots = data['slots']
+        ok, err = _availability_slots_valid(slots)
+        if not ok:
+            return error_response(err, 400)
+
+        CoachAvailability.query.filter_by(coach_id=coach_id).delete()
+
+        for raw in slots:
+            st = _parse_time_hhmm(raw['start_time'])
+            et = _parse_time_hhmm(raw['end_time'])
+            row = CoachAvailability(
+                coach_id=coach_id,
+                day_of_week=int(raw['day_of_week']),
+                start_time=st,
+                end_time=et,
+            )
+            db.session.add(row)
+
+        db.session.commit()
+
+        rows = CoachAvailability.query.filter_by(coach_id=coach_id).order_by(
+            CoachAvailability.day_of_week,
+            CoachAvailability.start_time
+        ).all()
+        return success_response(
+            {'slots': [r.to_dict() for r in rows]},
+            'Availability updated successfully',
+            200,
+        )
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to update availability', 500, str(e))
 def _coach_profile_payload(user_id):
     """Build coach self-profile dict (user + profile + coach survey + specializations)."""
     user = User.query.get(user_id)
