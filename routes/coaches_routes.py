@@ -616,3 +616,111 @@ def replace_my_availability():
     except Exception as e:
         db.session.rollback()
         return error_response('Failed to update availability', 500, str(e))
+def _coach_profile_payload(user_id):
+    """Build coach self-profile dict (user + profile + coach survey + specializations)."""
+    user = User.query.get(user_id)
+    if not user:
+        return None
+    coach_data = user.to_dict(include_profile=True)
+    coach_survey = CoachSurvey.query.filter_by(user_id=user_id).first()
+    coach_data['coach_info'] = coach_survey.to_dict() if coach_survey else None
+    specializations = CoachSpecialization.query.filter_by(coach_id=user_id).all()
+    coach_data['specializations'] = [cs.to_dict() for cs in specializations]
+    return coach_data
+
+
+@coaches_bp.route('/me/profile', methods=['GET'])
+@jwt_required()
+def get_my_coach_profile():
+    """
+    Coach: get own profile + qualifications (UC 3.3).
+    GET /api/coaches/me/profile
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        user = User.query.get(user_id)
+        if not user or user.role not in ('coach', 'both'):
+            return error_response('Coach profile is only available for coach accounts', 403)
+
+        coach_data = _coach_profile_payload(user_id)
+        return success_response(coach_data, 'Coach profile retrieved successfully', 200)
+    except Exception as e:
+        return error_response('Failed to retrieve coach profile', 500, str(e))
+
+
+@coaches_bp.route('/me/profile', methods=['PUT'])
+@jwt_required()
+def update_my_coach_profile():
+    """
+    Coach: update profile fields and qualifications (UC 3.3).
+    PUT /api/coaches/me/profile
+    Body: first_name, last_name, bio, phone (UserProfile);
+          experience_years, certifications, coach_bio, specialization_notes (CoachSurvey;
+          coach_bio maps to coach_surveys.bio).
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        user = User.query.get(user_id)
+        if not user or user.role not in ('coach', 'both'):
+            return error_response('Only coaches can update coach profile information', 403)
+
+        data = request.get_json()
+        if not data:
+            return error_response('Request body is required', 400)
+
+        profile = user.profile
+        if not profile:
+            profile = UserProfile(user_id=user_id)
+            db.session.add(profile)
+
+        allowed_profile = ('first_name', 'last_name', 'bio', 'phone')
+        for key in allowed_profile:
+            if key in data:
+                val = data[key]
+                if val is not None and not isinstance(val, str):
+                    return error_response(f'{key} must be a string', 400)
+                setattr(profile, key, val if val is not None else None)
+
+        survey = CoachSurvey.query.filter_by(user_id=user_id).first()
+        if not survey:
+            survey = CoachSurvey(user_id=user_id)
+            db.session.add(survey)
+
+        if 'experience_years' in data:
+            ey = data['experience_years']
+            if ey is None or ey == '':
+                survey.experience_years = None
+            else:
+                try:
+                    ey_int = int(ey)
+                except (TypeError, ValueError):
+                    return error_response('experience_years must be a whole number', 400)
+                if ey_int < 0 or ey_int > 80:
+                    return error_response('experience_years must be between 0 and 80', 400)
+                survey.experience_years = ey_int
+
+        if 'certifications' in data:
+            v = data['certifications']
+            if v is not None and not isinstance(v, str):
+                return error_response('certifications must be a string', 400)
+            survey.certifications = v
+
+        if 'coach_bio' in data:
+            v = data['coach_bio']
+            if v is not None and not isinstance(v, str):
+                return error_response('coach_bio must be a string', 400)
+            survey.bio = v
+
+        if 'specialization_notes' in data:
+            v = data['specialization_notes']
+            if v is not None and not isinstance(v, str):
+                return error_response('specialization_notes must be a string', 400)
+            survey.specialization_notes = v
+
+        db.session.commit()
+        coach_data = _coach_profile_payload(user_id)
+        return success_response(coach_data, 'Coach profile updated successfully', 200)
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to update coach profile', 500, str(e))
