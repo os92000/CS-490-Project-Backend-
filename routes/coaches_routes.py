@@ -1,4 +1,5 @@
 from datetime import time
+from decimal import Decimal, InvalidOperation
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, User, UserProfile, CoachSurvey, CoachSpecialization, Specialization, CoachAvailability, CoachPricing, ClientRequest, CoachRelationship, Review
@@ -63,6 +64,54 @@ def _availability_slots_valid(slots):
             if intervals[j][1] > intervals[j + 1][0]:
                 return False, 'Overlapping time slots on the same day'
     return True, None
+
+
+def _normalize_pricing_items(items):
+    """
+    Validate pricing rows for PUT /me/pricing.
+    Returns (list of {session_type, price, currency}, None) or (None, error_message).
+    """
+    if not isinstance(items, list):
+        return None, 'items must be a list'
+    if len(items) > 32:
+        return None, 'Too many pricing rows (max 32)'
+
+    out = []
+    for i, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            return None, f'Invalid row at index {i}'
+        st = raw.get('session_type')
+        if st is None or (isinstance(st, str) and not st.strip()):
+            return None, f'session_type is required for row {i} (e.g. Hourly, Weekly package)'
+        if not isinstance(st, str):
+            return None, f'session_type must be a string for row {i}'
+        st = st.strip()
+        if len(st) > 50:
+            return None, f'session_type too long (max 50 characters) for row {i}'
+
+        pr = raw.get('price')
+        if pr is None or (isinstance(pr, str) and not str(pr).strip()):
+            return None, f'price is required for row {i}'
+        try:
+            price = Decimal(str(pr))
+        except (InvalidOperation, TypeError, ValueError):
+            return None, f'Invalid price for row {i}'
+        if price <= 0:
+            return None, f'price must be greater than zero for row {i}'
+        if price > Decimal('999999.99'):
+            return None, f'price too large for row {i}'
+
+        cur = raw.get('currency') or 'USD'
+        if not isinstance(cur, str):
+            return None, f'currency must be a string for row {i}'
+        cur = cur.strip().upper()
+        if len(cur) != 3 or not cur.isalpha():
+            return None, f'currency must be a 3-letter code for row {i}'
+
+        out.append({'session_type': st, 'price': price, 'currency': cur})
+
+    return out, None
+
 
 coaches_bp = Blueprint('coaches', __name__, url_prefix='/api/coaches')
 
@@ -616,6 +665,75 @@ def replace_my_availability():
     except Exception as e:
         db.session.rollback()
         return error_response('Failed to update availability', 500, str(e))
+
+
+@coaches_bp.route('/me/pricing', methods=['GET'])
+@jwt_required()
+def get_my_pricing():
+    """Coach: list own pricing (UC 3.5)."""
+    try:
+        coach_id = int(get_jwt_identity())
+        user = User.query.get(coach_id)
+        if not user or user.role not in ('coach', 'both'):
+            return error_response('Only coaches can manage pricing', 403)
+
+        rows = CoachPricing.query.filter_by(coach_id=coach_id).order_by(CoachPricing.id).all()
+        return success_response(
+            {'items': [r.to_dict() for r in rows]},
+            'Pricing retrieved successfully',
+            200,
+        )
+    except Exception as e:
+        return error_response('Failed to retrieve pricing', 500, str(e))
+
+
+@coaches_bp.route('/me/pricing', methods=['PUT'])
+@jwt_required()
+def replace_my_pricing():
+    """
+    Coach: replace all pricing rows (UC 3.5).
+    PUT /api/coaches/me/pricing
+    Body: { "items": [ { "session_type": "Hourly", "price": 75.0, "currency": "USD" }, ... ] }
+    """
+    try:
+        coach_id = int(get_jwt_identity())
+        user = User.query.get(coach_id)
+        if not user or user.role not in ('coach', 'both'):
+            return error_response('Only coaches can manage pricing', 403)
+
+        data = request.get_json()
+        if not data or 'items' not in data:
+            return error_response('Request must include an items array', 400)
+
+        normalized, err = _normalize_pricing_items(data['items'])
+        if err:
+            return error_response(err, 400)
+
+        CoachPricing.query.filter_by(coach_id=coach_id).delete()
+
+        for row in normalized:
+            db.session.add(
+                CoachPricing(
+                    coach_id=coach_id,
+                    session_type=row['session_type'],
+                    price=row['price'],
+                    currency=row['currency'],
+                )
+            )
+
+        db.session.commit()
+
+        rows = CoachPricing.query.filter_by(coach_id=coach_id).order_by(CoachPricing.id).all()
+        return success_response(
+            {'items': [r.to_dict() for r in rows]},
+            'Pricing updated successfully',
+            200,
+        )
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to update pricing', 500, str(e))
+
+
 def _coach_profile_payload(user_id):
     """Build coach self-profile dict (user + profile + coach survey + specializations)."""
     user = User.query.get(user_id)
