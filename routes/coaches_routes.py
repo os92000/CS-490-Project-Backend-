@@ -115,6 +115,78 @@ def _normalize_pricing_items(items):
 
 coaches_bp = Blueprint('coaches', __name__, url_prefix='/api/coaches')
 
+
+@coaches_bp.route('/public/top-coaches', methods=['GET'])
+def get_public_top_coaches():
+    """
+    UC 7.2 — Top-rated coaches for visitors (no login).
+    Only includes coaches with at least one review, sorted by average rating.
+    """
+    try:
+        limit = request.args.get('limit', 15, type=int)
+        limit = max(1, min(limit, 30))
+
+        stats = (
+            db.session.query(
+                Review.coach_id,
+                func.avg(Review.rating).label('avg_r'),
+                func.count(Review.id).label('cnt'),
+            )
+            .group_by(Review.coach_id)
+            .having(func.count(Review.id) >= 1)
+            .subquery()
+        )
+
+        rows = (
+            db.session.query(User, stats.c.avg_r, stats.c.cnt)
+            .join(stats, User.id == stats.c.coach_id)
+            .filter(or_(User.role == 'coach', User.role == 'both'))
+            .filter(User.status == 'active')
+            .order_by(stats.c.avg_r.desc(), stats.c.cnt.desc())
+            .limit(limit)
+            .all()
+        )
+
+        coaches_out = []
+        for user, avg_r, cnt in rows:
+            coach_data = user.to_dict(include_profile=True)
+            coach_survey = CoachSurvey.query.filter_by(user_id=user.id).first()
+            coach_data['coach_info'] = coach_survey.to_dict() if coach_survey else None
+
+            coach_data['rating'] = {
+                'average': float(avg_r) if avg_r is not None else 0.0,
+                'count': int(cnt),
+            }
+
+            recent = (
+                Review.query.filter_by(coach_id=user.id)
+                .order_by(Review.created_at.desc())
+                .limit(3)
+                .all()
+            )
+            sample = []
+            for rev in recent:
+                label = 'Member'
+                if rev.client and rev.client.profile and rev.client.profile.first_name:
+                    label = rev.client.profile.first_name
+                sample.append(
+                    {
+                        'id': rev.id,
+                        'rating': rev.rating,
+                        'comment': rev.comment,
+                        'created_at': rev.created_at.isoformat() if rev.created_at else None,
+                        'reviewer_label': label,
+                    }
+                )
+            coach_data['sample_reviews'] = sample
+            coaches_out.append(coach_data)
+
+        return success_response({'coaches': coaches_out}, 'Top coaches retrieved successfully', 200)
+
+    except Exception as e:
+        return error_response('Failed to retrieve top coaches', 500, str(e))
+
+
 @coaches_bp.route('', methods=['GET'])
 @jwt_required()
 def get_coaches():
