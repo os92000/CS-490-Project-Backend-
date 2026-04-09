@@ -2,7 +2,7 @@ from datetime import time
 from decimal import Decimal, InvalidOperation
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, User, UserProfile, CoachSurvey, CoachSpecialization, Specialization, CoachAvailability, CoachPricing, ClientRequest, CoachRelationship, Review
+from models import db, User, UserProfile, CoachSurvey, CoachSpecialization, Specialization, CoachAvailability, CoachPricing, ClientRequest, CoachRelationship, Review, FitnessSurvey, WorkoutLog, BodyMetric, WellnessLog, CoachApplication, ModerationReport
 from utils.helpers import success_response, error_response
 from sqlalchemy import func, or_
 
@@ -203,6 +203,12 @@ def get_coaches():
         # Base query: users who are coaches or both
         query = User.query.filter(or_(User.role == 'coach', User.role == 'both'))
         query = query.filter(User.status == 'active')
+        query = query.outerjoin(CoachApplication, CoachApplication.user_id == User.id).filter(
+            or_(
+                CoachApplication.id.is_(None),
+                CoachApplication.status == 'approved'
+            )
+        )
 
         # Join with profile for search
         if search:
@@ -290,6 +296,10 @@ def get_coach_details(coach_id):
         if coach.role not in ['coach', 'both']:
             return error_response('User is not a coach', 400)
 
+        application = CoachApplication.query.filter_by(user_id=coach_id).first()
+        if application and application.status != 'approved':
+            return error_response('Coach profile is not yet approved', 403)
+
         # Build detailed coach data
         coach_data = coach.to_dict(include_profile=True)
 
@@ -319,6 +329,7 @@ def get_coach_details(coach_id):
             'average': float(avg_rating) if avg_rating else 0,
             'count': review_count
         }
+        coach_data['application'] = application.to_dict() if application else None
 
         return success_response(coach_data, 'Coach details retrieved successfully', 200)
 
@@ -662,6 +673,198 @@ def get_my_coach():
 
     except Exception as e:
         return error_response('Failed to retrieve coach', 500, str(e))
+
+
+@coaches_bp.route('/application', methods=['GET', 'POST'])
+@jwt_required()
+def coach_application():
+    """Get or submit a coach application"""
+    try:
+        user_id = int(get_jwt_identity())
+        user = User.query.get(user_id)
+        if not user or user.role not in ['coach', 'both']:
+            return error_response('Coach role required', 403)
+
+        application = CoachApplication.query.filter_by(user_id=user_id).first()
+
+        if request.method == 'GET':
+            return success_response(
+                application.to_dict() if application else None,
+                'Coach application retrieved successfully',
+                200
+            )
+
+        data = request.get_json() or {}
+        if application:
+            application.status = 'pending'
+            application.notes = data.get('notes', application.notes)
+            application.submitted_at = datetime.utcnow()
+            application.reviewed_at = None
+            application.reviewed_by = None
+        else:
+            application = CoachApplication(
+                user_id=user_id,
+                notes=data.get('notes'),
+                status='pending'
+            )
+            db.session.add(application)
+
+        db.session.commit()
+        return success_response(application.to_dict(), 'Coach application submitted successfully', 201)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to manage coach application', 500, str(e))
+
+
+@coaches_bp.route('/me/settings', methods=['GET', 'PUT'])
+@jwt_required()
+def manage_coach_settings():
+    """Get or update coach settings/profile details"""
+    try:
+        coach_id = int(get_jwt_identity())
+        user = User.query.get(coach_id)
+
+        if not user or user.role not in ['coach', 'both']:
+            return error_response('Coach access required', 403)
+
+        coach_survey = CoachSurvey.query.filter_by(user_id=coach_id).first()
+        if not coach_survey:
+            coach_survey = CoachSurvey(user_id=coach_id)
+            db.session.add(coach_survey)
+            db.session.flush()
+
+        if request.method == 'GET':
+            specializations = CoachSpecialization.query.filter_by(coach_id=coach_id).all()
+            availability = CoachAvailability.query.filter_by(coach_id=coach_id).order_by(
+                CoachAvailability.day_of_week.asc(),
+                CoachAvailability.start_time.asc()
+            ).all()
+            pricing = CoachPricing.query.filter_by(coach_id=coach_id).all()
+
+            application = CoachApplication.query.filter_by(user_id=coach_id).first()
+            return success_response({
+                'coach_info': coach_survey.to_dict(),
+                'specializations': [item.to_dict() for item in specializations],
+                'availability': [slot.to_dict() for slot in availability],
+                'pricing': [item.to_dict() for item in pricing],
+                'application': application.to_dict() if application else None
+            }, 'Coach settings retrieved successfully', 200)
+
+        data = request.get_json() or {}
+
+        if 'experience_years' in data:
+            coach_survey.experience_years = data.get('experience_years')
+        if 'certifications' in data:
+            coach_survey.certifications = data.get('certifications')
+        if 'bio' in data:
+            coach_survey.bio = data.get('bio')
+        if 'specialization_notes' in data:
+            coach_survey.specialization_notes = data.get('specialization_notes')
+
+        if 'specialization_ids' in data and isinstance(data['specialization_ids'], list):
+            CoachSpecialization.query.filter_by(coach_id=coach_id).delete()
+            for specialization_id in data['specialization_ids']:
+                db.session.add(CoachSpecialization(
+                    coach_id=coach_id,
+                    specialization_id=specialization_id
+                ))
+
+        if 'availability' in data and isinstance(data['availability'], list):
+            CoachAvailability.query.filter_by(coach_id=coach_id).delete()
+            for slot in data['availability']:
+                if not slot.get('start_time') or not slot.get('end_time'):
+                    continue
+                db.session.add(CoachAvailability(
+                    coach_id=coach_id,
+                    day_of_week=slot.get('day_of_week'),
+                    start_time=datetime.strptime(slot['start_time'], '%H:%M').time(),
+                    end_time=datetime.strptime(slot['end_time'], '%H:%M').time()
+                ))
+
+        if 'pricing' in data and isinstance(data['pricing'], list):
+            CoachPricing.query.filter_by(coach_id=coach_id).delete()
+            for item in data['pricing']:
+                if item.get('price') in [None, '']:
+                    continue
+                db.session.add(CoachPricing(
+                    coach_id=coach_id,
+                    session_type=item.get('session_type'),
+                    price=item.get('price'),
+                    currency=item.get('currency', 'USD')
+                ))
+
+        db.session.commit()
+
+        return success_response({
+            'coach_info': coach_survey.to_dict()
+        }, 'Coach settings updated successfully', 200)
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to manage coach settings', 500, str(e))
+
+
+@coaches_bp.route('/<int:coach_id>/report', methods=['POST'])
+@jwt_required()
+def report_coach(coach_id):
+    """Report a coach for admin review"""
+    try:
+        reporter_id = int(get_jwt_identity())
+        data = request.get_json() or {}
+
+        coach = User.query.get(coach_id)
+        if not coach or coach.role not in ['coach', 'both']:
+            return error_response('Coach not found', 404)
+
+        if not data.get('reason'):
+            return error_response('reason is required', 400)
+
+        report = ModerationReport(
+            report_type='coach',
+            reporter_id=reporter_id,
+            reported_user_id=coach_id,
+            reason=data['reason'],
+            details=data.get('details')
+        )
+        db.session.add(report)
+        db.session.commit()
+        return success_response(report.to_dict(), 'Coach reported successfully', 201)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to report coach', 500, str(e))
+
+
+@coaches_bp.route('/clients/<int:client_id>/progress', methods=['GET'])
+@jwt_required()
+def get_client_progress(client_id):
+    """Get progress snapshot for a coach's active client"""
+    try:
+        coach_id = int(get_jwt_identity())
+        relationship = CoachRelationship.query.filter_by(
+            coach_id=coach_id,
+            client_id=client_id,
+            status='active'
+        ).first()
+
+        if not relationship:
+            return error_response('No active relationship with this client', 403)
+
+        client = User.query.get(client_id)
+        survey = FitnessSurvey.query.filter_by(user_id=client_id).first()
+        body_metrics = BodyMetric.query.filter_by(user_id=client_id).order_by(BodyMetric.date.desc()).limit(12).all()
+        wellness_logs = WellnessLog.query.filter_by(user_id=client_id).order_by(WellnessLog.date.desc()).limit(14).all()
+        workout_logs = WorkoutLog.query.filter_by(client_id=client_id).order_by(WorkoutLog.date.desc()).limit(12).all()
+
+        return success_response({
+            'client': client.to_dict(include_profile=True) if client else None,
+            'survey': survey.to_dict() if survey else None,
+            'body_metrics': [metric.to_dict() for metric in body_metrics],
+            'wellness_logs': [log.to_dict() for log in wellness_logs],
+            'workout_logs': [log.to_dict(include_exercises=True) for log in workout_logs]
+        }, 'Client progress retrieved successfully', 200)
+
+    except Exception as e:
+        return error_response('Failed to retrieve client progress', 500, str(e))
 
 
 @coaches_bp.route('/me/availability', methods=['GET'])

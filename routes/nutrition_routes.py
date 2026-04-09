@@ -1,7 +1,7 @@
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, MealLog, BodyMetric, WellnessLog
-from utils.helpers import success_response, error_response
+from models import db, MealLog, BodyMetric, WellnessLog, DailyMetric, MealPlan
+from utils.helpers import success_response, error_response, is_current_day
 from datetime import datetime, date
 
 nutrition_bp = Blueprint('nutrition', __name__, url_prefix='/api/nutrition')
@@ -52,6 +52,56 @@ def meal_logs():
             db.session.rollback()
             return error_response('Failed to log meal', 500, str(e))
 
+
+@nutrition_bp.route('/meals/<int:meal_id>', methods=['DELETE'])
+@jwt_required()
+def delete_meal_log(meal_id):
+    user_id = int(get_jwt_identity())
+
+    try:
+        meal = MealLog.query.filter_by(id=meal_id, user_id=user_id).first()
+        if not meal:
+            return error_response('Meal not found', 404)
+        if not is_current_day(meal.date):
+            return error_response('Only current-day meal entries can be deleted', 403)
+
+        db.session.delete(meal)
+        db.session.commit()
+        return success_response(None, 'Meal deleted', 200)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to delete meal', 500, str(e))
+
+
+@nutrition_bp.route('/meal-plans', methods=['GET', 'POST'])
+@jwt_required()
+def meal_plans():
+    user_id = int(get_jwt_identity())
+
+    if request.method == 'GET':
+        try:
+            plans = MealPlan.query.filter_by(user_id=user_id).order_by(MealPlan.created_at.desc()).all()
+            return success_response({'meal_plans': [plan.to_dict() for plan in plans]}, 'Meal plans retrieved', 200)
+        except Exception as e:
+            return error_response('Failed to retrieve meal plans', 500, str(e))
+
+    try:
+        data = request.get_json() or {}
+        if not data.get('title'):
+            return error_response('title is required', 400)
+
+        plan = MealPlan(
+            user_id=user_id,
+            title=data['title'],
+            notes=data.get('notes')
+        )
+        db.session.add(plan)
+        db.session.commit()
+        return success_response(plan.to_dict(), 'Meal plan saved', 201)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to save meal plan', 500, str(e))
+
 # Body Metrics
 @nutrition_bp.route('/metrics', methods=['GET', 'POST'])
 @jwt_required()
@@ -91,6 +141,79 @@ def body_metrics():
             db.session.rollback()
             return error_response('Failed to log metric', 500, str(e))
 
+
+@nutrition_bp.route('/metrics/<int:metric_id>', methods=['DELETE'])
+@jwt_required()
+def delete_body_metric(metric_id):
+    user_id = int(get_jwt_identity())
+
+    try:
+        metric = BodyMetric.query.filter_by(id=metric_id, user_id=user_id).first()
+        if not metric:
+            return error_response('Metric not found', 404)
+        if not is_current_day(metric.date):
+            return error_response('Only current-day metrics can be deleted', 403)
+
+        db.session.delete(metric)
+        db.session.commit()
+        return success_response(None, 'Metric deleted', 200)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to delete metric', 500, str(e))
+
+
+@nutrition_bp.route('/daily-metrics', methods=['GET', 'POST'])
+@jwt_required()
+def daily_metrics():
+    user_id = int(get_jwt_identity())
+
+    if request.method == 'GET':
+        try:
+            metrics = DailyMetric.query.filter_by(user_id=user_id).order_by(DailyMetric.date.desc()).all()
+            return success_response({'daily_metrics': [metric.to_dict() for metric in metrics]}, 'Daily metrics retrieved', 200)
+        except Exception as e:
+            return error_response('Failed to retrieve daily metrics', 500, str(e))
+
+    try:
+        data = request.get_json() or {}
+        if not data.get('date'):
+            return error_response('date is required', 400)
+
+        metric = DailyMetric(
+            user_id=user_id,
+            date=datetime.fromisoformat(data['date']).date(),
+            steps=data.get('steps'),
+            calories_burned=data.get('calories_burned'),
+            water_intake_ml=data.get('water_intake_ml'),
+            notes=data.get('notes')
+        )
+        db.session.add(metric)
+        db.session.commit()
+        return success_response(metric.to_dict(), 'Daily metric saved', 201)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to save daily metric', 500, str(e))
+
+
+@nutrition_bp.route('/daily-metrics/<int:metric_id>', methods=['DELETE'])
+@jwt_required()
+def delete_daily_metric(metric_id):
+    user_id = int(get_jwt_identity())
+
+    try:
+        metric = DailyMetric.query.filter_by(id=metric_id, user_id=user_id).first()
+        if not metric:
+            return error_response('Daily metric not found', 404)
+        if not is_current_day(metric.date):
+            return error_response('Only current-day metrics can be deleted', 403)
+
+        db.session.delete(metric)
+        db.session.commit()
+        return success_response(None, 'Daily metric deleted', 200)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to delete daily metric', 500, str(e))
+
 # Wellness Logs
 @nutrition_bp.route('/wellness', methods=['GET', 'POST'])
 @jwt_required()
@@ -127,3 +250,23 @@ def wellness_logs():
         except Exception as e:
             db.session.rollback()
             return error_response('Failed to log wellness', 500, str(e))
+
+
+@nutrition_bp.route('/wellness/<int:log_id>', methods=['DELETE'])
+@jwt_required()
+def delete_wellness_log(log_id):
+    user_id = int(get_jwt_identity())
+
+    try:
+        log = WellnessLog.query.filter_by(id=log_id, user_id=user_id).first()
+        if not log:
+            return error_response('Wellness log not found', 404)
+        if not is_current_day(log.date):
+            return error_response('Only current-day wellness entries can be deleted', 403)
+
+        db.session.delete(log)
+        db.session.commit()
+        return success_response(None, 'Wellness log deleted', 200)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to delete wellness log', 500, str(e))

@@ -3,6 +3,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
+from sqlalchemy import inspect, text
 from config import config
 from models import db
 
@@ -154,9 +155,137 @@ def create_app(config_name=None):
     # Create database tables
     with app.app_context():
         db.create_all()
+        ensure_schema_updates()
 
     return app
 
+def ensure_schema_updates():
+    """Apply small additive schema updates for existing databases."""
+    dialect = db.engine.dialect.name
+    inspector = inspect(db.engine)
+
+    def ensure_columns(table_name, column_definitions):
+        if not inspector.has_table(table_name):
+            return set()
+
+        existing_columns = {
+            column['name'] for column in inspector.get_columns(table_name)
+        }
+
+        for column_name, definitions in column_definitions.items():
+            if column_name in existing_columns:
+                continue
+
+            column_type = definitions.get(dialect, definitions['default'])
+            db.session.execute(
+                text(
+                    f'ALTER TABLE {table_name} '
+                    f'ADD COLUMN `{column_name}` {column_type}'
+                )
+            )
+            existing_columns.add(column_name)
+
+        return existing_columns
+
+    ensure_columns('coach_applications', {
+        'notes': {
+            'sqlite': 'TEXT',
+            'default': 'TEXT'
+        },
+        'reviewed_by': {
+            'sqlite': 'INTEGER',
+            'default': 'INTEGER'
+        },
+        'submitted_at': {
+            'sqlite': 'DATETIME',
+            'default': 'DATETIME'
+        },
+        'reviewed_at': {
+            'sqlite': 'DATETIME',
+            'default': 'DATETIME'
+        }
+    })
+
+    ensure_columns('workout_logs', {
+        'library_exercise_id': {
+            'sqlite': 'INTEGER',
+            'default': 'INTEGER'
+        },
+        'workout_name': {
+            'sqlite': 'VARCHAR(200)',
+            'default': 'VARCHAR(200)'
+        },
+        'calories_burned': {
+            'sqlite': 'INTEGER',
+            'default': 'INTEGER'
+        },
+        'exercise_type': {
+            'sqlite': 'VARCHAR(50)',
+            'default': 'VARCHAR(50)'
+        },
+        'muscle_group': {
+            'sqlite': 'VARCHAR(100)',
+            'default': 'VARCHAR(100)'
+        }
+    })
+
+    ensure_columns('exercises', {
+        'calories': {
+            'sqlite': 'INTEGER',
+            'default': 'INTEGER'
+        },
+        'default_duration_minutes': {
+            'sqlite': 'INTEGER',
+            'default': 'INTEGER'
+        },
+        'is_library_workout': {
+            'sqlite': 'BOOLEAN',
+            'default': 'BOOLEAN'
+        }
+    })
+
+    daily_metric_columns = ensure_columns('daily_metrics', {
+        'date': {
+            'sqlite': 'DATE',
+            'default': 'DATE'
+        },
+        'notes': {
+            'sqlite': 'TEXT',
+            'default': 'TEXT'
+        }
+    })
+    if {'date', 'log_date'}.issubset(daily_metric_columns):
+        db.session.execute(text(
+            'UPDATE daily_metrics SET date = log_date WHERE date IS NULL'
+        ))
+
+    meal_plan_columns = ensure_columns('meal_plans', {
+        'title': {
+            'sqlite': 'VARCHAR(200)',
+            'default': 'VARCHAR(200)'
+        },
+        'notes': {
+            'sqlite': 'TEXT',
+            'default': 'TEXT'
+        }
+    })
+    if {'title', 'name'}.issubset(meal_plan_columns):
+        db.session.execute(text(
+            'UPDATE meal_plans SET title = name WHERE title IS NULL OR title = ""'
+        ))
+
+    notification_columns = ensure_columns('notifications', {
+        'read': {
+            'sqlite': 'BOOLEAN',
+            'default': 'BOOLEAN'
+        }
+    })
+    if {'read', 'read_status'}.issubset(notification_columns):
+        db.session.execute(text(
+            'UPDATE notifications SET `read` = read_status WHERE `read` IS NULL'
+        ))
+
+    db.session.commit()
 
 if __name__ == '__main__':
     app = create_app()

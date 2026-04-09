@@ -1,6 +1,7 @@
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, User, Exercise, WorkoutPlan, WorkoutDay, PlanExercise, WorkoutLog, ExerciseLog, CoachRelationship
+import json
+from models import db, User, Exercise, WorkoutPlan, WorkoutDay, PlanExercise, WorkoutLog, ExerciseLog, CoachRelationship, WorkoutPlanMetadata, WorkoutTemplate, WorkoutPlanAssignment
 from utils.helpers import success_response, error_response
 from datetime import datetime, date
 from sqlalchemy import or_, and_
@@ -139,6 +140,133 @@ def create_exercise():
         return error_response('Failed to create exercise', 500, str(e))
 
 
+@workouts_bp.route('/templates', methods=['GET', 'POST'])
+@jwt_required()
+def workout_templates():
+    """
+    Browse or create workout templates
+    GET /api/workouts/templates
+    POST /api/workouts/templates
+    """
+    try:
+        user_id = int(get_jwt_identity())
+
+        if request.method == 'GET':
+            query = WorkoutTemplate.query.filter(
+                or_(
+                    and_(WorkoutTemplate.is_public == True, WorkoutTemplate.approved == True),
+                    WorkoutTemplate.created_by == user_id
+                )
+            )
+
+            goal = request.args.get('goal')
+            difficulty = request.args.get('difficulty')
+            plan_type = request.args.get('plan_type')
+            if goal:
+                query = query.filter(WorkoutTemplate.goal.ilike(f'%{goal}%'))
+            if difficulty:
+                query = query.filter_by(difficulty=difficulty)
+            if plan_type:
+                query = query.filter_by(plan_type=plan_type)
+
+            templates = query.order_by(WorkoutTemplate.created_at.desc()).all()
+            return success_response({
+                'templates': [template.to_dict() for template in templates]
+            }, 'Workout templates retrieved successfully', 200)
+
+        data = request.get_json() or {}
+        if not data.get('name') or not data.get('template_data'):
+            return error_response('name and template_data are required', 400)
+
+        template = WorkoutTemplate(
+            name=data['name'],
+            description=data.get('description'),
+            goal=data.get('goal'),
+            difficulty=data.get('difficulty'),
+            plan_type=data.get('plan_type'),
+            duration_weeks=data.get('duration_weeks'),
+            template_data=json.dumps(data['template_data']),
+            created_by=user_id,
+            is_public=data.get('is_public', False),
+            approved=False
+        )
+        db.session.add(template)
+        db.session.commit()
+        return success_response(template.to_dict(), 'Workout template created successfully', 201)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to manage workout templates', 500, str(e))
+
+
+@workouts_bp.route('/templates/<int:template_id>/customize', methods=['POST'])
+@jwt_required()
+def customize_workout_template(template_id):
+    """
+    Customize a template into a self-directed workout plan
+    POST /api/workouts/templates/{template_id}/customize
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        data = request.get_json() or {}
+        template = WorkoutTemplate.query.get(template_id)
+        if not template:
+            return error_response('Workout template not found', 404)
+
+        if not template.approved and template.created_by != user_id:
+            return error_response('Template is not available', 403)
+
+        template_data = template.to_dict()['template_data']
+        days = data.get('days', template_data.get('days', []))
+
+        plan = WorkoutPlan(
+            name=data.get('name', f'{template.name} (Customized)'),
+            description=data.get('description', template.description),
+            coach_id=user_id,
+            client_id=user_id,
+            start_date=datetime.fromisoformat(data['start_date']).date() if data.get('start_date') else None,
+            end_date=datetime.fromisoformat(data['end_date']).date() if data.get('end_date') else None
+        )
+        db.session.add(plan)
+        db.session.flush()
+
+        db.session.add(WorkoutPlanMetadata(
+            plan_id=plan.id,
+            goal=data.get('goal', template.goal),
+            difficulty=data.get('difficulty', template.difficulty),
+            plan_type=data.get('plan_type', template.plan_type),
+            duration_weeks=data.get('duration_weeks', template.duration_weeks)
+        ))
+
+        for day_data in days:
+            day = WorkoutDay(
+                plan_id=plan.id,
+                name=day_data.get('name'),
+                day_number=day_data.get('day_number'),
+                notes=day_data.get('notes')
+            )
+            db.session.add(day)
+            db.session.flush()
+
+            for exercise_data in day_data.get('exercises', []):
+                db.session.add(PlanExercise(
+                    workout_day_id=day.id,
+                    exercise_id=exercise_data['exercise_id'],
+                    order=exercise_data.get('order'),
+                    sets=exercise_data.get('sets'),
+                    reps=exercise_data.get('reps'),
+                    duration_minutes=exercise_data.get('duration_minutes'),
+                    rest_seconds=exercise_data.get('rest_seconds'),
+                    weight=exercise_data.get('weight'),
+                    notes=exercise_data.get('notes')
+                ))
+
+        db.session.commit()
+        return success_response(plan.to_dict(include_days=True), 'Workout template customized successfully', 201)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to customize workout template', 500, str(e))
+
+
 # ============================================
 # Workout Plan Management
 # ============================================
@@ -159,6 +287,26 @@ def get_workout_plans():
             plans = WorkoutPlan.query.filter_by(coach_id=user_id).all()
         else:
             plans = WorkoutPlan.query.filter_by(client_id=user_id).all()
+
+        goal = request.args.get('goal')
+        difficulty = request.args.get('difficulty')
+        plan_type = request.args.get('plan_type')
+        duration_weeks = request.args.get('duration_weeks', type=int)
+
+        if any([goal, difficulty, plan_type, duration_weeks]):
+            filtered_plans = []
+            for plan in plans:
+                metadata = WorkoutPlanMetadata.query.filter_by(plan_id=plan.id).first()
+                if goal and (not metadata or goal.lower() not in (metadata.goal or '').lower()):
+                    continue
+                if difficulty and (not metadata or metadata.difficulty != difficulty):
+                    continue
+                if plan_type and (not metadata or metadata.plan_type != plan_type):
+                    continue
+                if duration_weeks and (not metadata or metadata.duration_weeks != duration_weeks):
+                    continue
+                filtered_plans.append(plan)
+            plans = filtered_plans
 
         # Safely serialize plans with error handling
         plans_data = []
@@ -378,6 +526,48 @@ def delete_workout_plan(plan_id):
     except Exception as e:
         db.session.rollback()
         return error_response('Failed to delete workout plan', 500, str(e))
+
+
+@workouts_bp.route('/assignments', methods=['POST', 'DELETE'])
+@jwt_required()
+def workout_assignments():
+    """Assign workout plans to specific calendar days"""
+    user_id = int(get_jwt_identity())
+
+    if request.method == 'POST':
+        try:
+            data = request.get_json() or {}
+            if not data.get('plan_id') or not data.get('assigned_date'):
+                return error_response('plan_id and assigned_date are required', 400)
+
+            plan = WorkoutPlan.query.get(data['plan_id'])
+            if not plan or plan.client_id != user_id:
+                return error_response('Workout plan not found', 404)
+
+            assignment = WorkoutPlanAssignment(
+                user_id=user_id,
+                plan_id=plan.id,
+                workout_day_id=data.get('workout_day_id'),
+                assigned_date=datetime.fromisoformat(data['assigned_date']).date()
+            )
+            db.session.add(assignment)
+            db.session.commit()
+            return success_response(assignment.to_dict(), 'Workout assigned to calendar', 201)
+        except Exception as e:
+            db.session.rollback()
+            return error_response('Failed to assign workout plan', 500, str(e))
+
+    try:
+        assignment_id = request.args.get('assignment_id', type=int)
+        assignment = WorkoutPlanAssignment.query.filter_by(id=assignment_id, user_id=user_id).first()
+        if not assignment:
+            return error_response('Assignment not found', 404)
+        db.session.delete(assignment)
+        db.session.commit()
+        return success_response(None, 'Workout assignment removed', 200)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to remove workout assignment', 500, str(e))
 
 
 # ============================================
@@ -625,10 +815,16 @@ def get_workout_calendar():
             client_id=user_id,
             status='active'
         ).all()
+        assignments = WorkoutPlanAssignment.query.filter(
+            WorkoutPlanAssignment.user_id == user_id,
+            WorkoutPlanAssignment.assigned_date >= first_day,
+            WorkoutPlanAssignment.assigned_date <= last_day
+        ).all()
 
         return success_response({
             'logs': [log.to_dict() for log in logs],
-            'plans': [plan.to_dict() for plan in plans]
+            'plans': [plan.to_dict() for plan in plans],
+            'assignments': [assignment.to_dict() for assignment in assignments]
         }, 'Calendar data retrieved successfully', 200)
 
     except Exception as e:

@@ -1,7 +1,7 @@
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_socketio import emit, join_room, leave_room
-from models import db, User, CoachRelationship, ChatMessage
+from models import db, User, CoachRelationship, ChatMessage, ModerationReport
 from utils.helpers import success_response, error_response
 from datetime import datetime
 
@@ -164,6 +164,44 @@ def send_message():
     except Exception as e:
         db.session.rollback()
         return error_response('Failed to send message', 500, str(e))
+
+
+@chat_bp.route('/reports', methods=['POST'])
+@jwt_required()
+def create_chat_report():
+    """
+    Report a chat conversation for admin review
+    POST /api/chat/reports
+    Body: {relationship_id, reason, details}
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        data = request.get_json() or {}
+
+        if not data.get('relationship_id') or not data.get('reason'):
+            return error_response('relationship_id and reason are required', 400)
+
+        relationship = CoachRelationship.query.get(data['relationship_id'])
+        if not relationship:
+            return error_response('Relationship not found', 404)
+
+        if relationship.client_id != user_id and relationship.coach_id != user_id:
+            return error_response('Unauthorized to report this conversation', 403)
+
+        report = ModerationReport(
+            report_type='chat',
+            reporter_id=user_id,
+            reported_user_id=relationship.coach_id if relationship.client_id == user_id else relationship.client_id,
+            relationship_id=relationship.id,
+            reason=data['reason'],
+            details=data.get('details')
+        )
+        db.session.add(report)
+        db.session.commit()
+        return success_response(report.to_dict(), 'Chat report submitted successfully', 201)
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to report conversation', 500, str(e))
 
 
 # WebSocket event handlers

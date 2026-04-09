@@ -1,6 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
+import json
 
 db = SQLAlchemy()
 
@@ -315,6 +316,73 @@ class ClientRequest(db.Model):
         return f'<ClientRequest client={self.client_id} coach={self.coach_id} status={self.status}>'
 
 
+class CoachApplication(db.Model):
+    """Coach application workflow for admin approval"""
+    __tablename__ = 'coach_applications'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), unique=True, nullable=False)
+    status = db.Column(db.Enum('pending', 'approved', 'denied', name='coach_application_status'), default='pending')
+    notes = db.Column(db.Text)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    submitted_at = db.Column(db.DateTime, default=datetime.utcnow)
+    reviewed_at = db.Column(db.DateTime)
+
+    user = db.relationship('User', foreign_keys=[user_id], backref='coach_application')
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'status': self.status,
+            'notes': self.notes,
+            'reviewed_by': self.reviewed_by,
+            'submitted_at': self.submitted_at.isoformat() if self.submitted_at else None,
+            'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
+            'user': self.user.to_dict(include_profile=True) if self.user else None
+        }
+
+
+class ModerationReport(db.Model):
+    """Coach and chat reporting for admin moderation"""
+    __tablename__ = 'moderation_reports'
+
+    id = db.Column(db.Integer, primary_key=True)
+    report_type = db.Column(db.Enum('coach', 'chat', name='moderation_report_type'), nullable=False)
+    reporter_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    reported_user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'))
+    relationship_id = db.Column(db.Integer, db.ForeignKey('coach_relationships.id', ondelete='CASCADE'))
+    reason = db.Column(db.String(255), nullable=False)
+    details = db.Column(db.Text)
+    status = db.Column(db.Enum('open', 'reviewed', 'resolved', 'dismissed', name='moderation_report_status'), default='open')
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    reviewed_at = db.Column(db.DateTime)
+
+    reporter = db.relationship('User', foreign_keys=[reporter_id], backref='reports_created')
+    reported_user = db.relationship('User', foreign_keys=[reported_user_id], backref='reports_received')
+    relationship = db.relationship('CoachRelationship', backref='moderation_reports')
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'report_type': self.report_type,
+            'reporter_id': self.reporter_id,
+            'reported_user_id': self.reported_user_id,
+            'relationship_id': self.relationship_id,
+            'reason': self.reason,
+            'details': self.details,
+            'status': self.status,
+            'reviewed_by': self.reviewed_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
+            'reporter': self.reporter.to_dict(include_profile=True) if self.reporter else None,
+            'reported_user': self.reported_user.to_dict(include_profile=True) if self.reported_user else None
+        }
+
+
 class CoachRelationship(db.Model):
     """Active client-coach relationships"""
     __tablename__ = 'coach_relationships'
@@ -510,6 +578,97 @@ class WorkoutPlan(db.Model):
 
     def __repr__(self):
         return f'<WorkoutPlan {self.name}>'
+
+
+class WorkoutPlanMetadata(db.Model):
+    """Optional metadata used for plan filtering"""
+    __tablename__ = 'workout_plan_metadata'
+
+    id = db.Column(db.Integer, primary_key=True)
+    plan_id = db.Column(db.Integer, db.ForeignKey('workout_plans.id', ondelete='CASCADE'), unique=True, nullable=False)
+    goal = db.Column(db.String(100))
+    difficulty = db.Column(db.String(50))
+    plan_type = db.Column(db.String(50))
+    duration_weeks = db.Column(db.Integer)
+
+    plan = db.relationship('WorkoutPlan', backref='metadata_record')
+
+    def to_dict(self):
+        return {
+            'goal': self.goal,
+            'difficulty': self.difficulty,
+            'plan_type': self.plan_type,
+            'duration_weeks': self.duration_weeks
+        }
+
+
+class WorkoutTemplate(db.Model):
+    """Prebuilt workout template that can be customized into a plan"""
+    __tablename__ = 'workout_templates'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    goal = db.Column(db.String(100))
+    difficulty = db.Column(db.String(50))
+    plan_type = db.Column(db.String(50))
+    duration_weeks = db.Column(db.Integer)
+    template_data = db.Column(db.Text, nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    is_public = db.Column(db.Boolean, default=True)
+    approved = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    creator = db.relationship('User', backref='workout_templates')
+
+    def to_dict(self):
+        try:
+            data = json.loads(self.template_data or '{}')
+        except Exception:
+            data = {}
+
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'goal': self.goal,
+            'difficulty': self.difficulty,
+            'plan_type': self.plan_type,
+            'duration_weeks': self.duration_weeks,
+            'template_data': data,
+            'created_by': self.created_by,
+            'is_public': self.is_public,
+            'approved': self.approved,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
+class WorkoutPlanAssignment(db.Model):
+    """Explicit calendar assignments for workout plans"""
+    __tablename__ = 'workout_plan_assignments'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    plan_id = db.Column(db.Integer, db.ForeignKey('workout_plans.id', ondelete='CASCADE'), nullable=False)
+    workout_day_id = db.Column(db.Integer, db.ForeignKey('workout_days.id', ondelete='SET NULL'))
+    assigned_date = db.Column(db.Date, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', backref='workout_assignments')
+    plan = db.relationship('WorkoutPlan', backref='assignments')
+    workout_day = db.relationship('WorkoutDay', backref='assignments')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'plan_id': self.plan_id,
+            'workout_day_id': self.workout_day_id,
+            'assigned_date': self.assigned_date.isoformat() if self.assigned_date else None,
+            'plan': self.plan.to_dict() if self.plan else None,
+            'workout_day': self.workout_day.to_dict() if self.workout_day else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
 
 
 class WorkoutDay(db.Model):
@@ -792,6 +951,56 @@ class WellnessLog(db.Model):
         return f'<WellnessLog user={self.user_id} date={self.date}>'
 
 
+class DailyMetric(db.Model):
+    """Daily activity metrics like steps and water"""
+    __tablename__ = 'daily_metrics'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    date = db.Column(db.Date, nullable=False)
+    steps = db.Column(db.Integer)
+    calories_burned = db.Column(db.Integer)
+    water_intake_ml = db.Column(db.Integer)
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', backref='daily_metrics')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'date': self.date.isoformat() if self.date else None,
+            'steps': self.steps,
+            'calories_burned': self.calories_burned,
+            'water_intake_ml': self.water_intake_ml,
+            'notes': self.notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
+class MealPlan(db.Model):
+    """Simple meal plan records"""
+    __tablename__ = 'meal_plans'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', backref='meal_plans')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'title': self.title,
+            'notes': self.notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
 # ============================================
 # PHASE 10: Profile Management
 # ============================================
@@ -823,3 +1032,39 @@ class Notification(db.Model):
 
     def __repr__(self):
         return f'<Notification {self.id}>'
+
+
+class PaymentRecord(db.Model):
+    """Mock payment records used for payment history and analytics"""
+    __tablename__ = 'payment_records'
+
+    id = db.Column(db.Integer, primary_key=True)
+    payer_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    coach_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'))
+    payment_reference = db.Column(db.String(100), unique=True, nullable=False)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    currency = db.Column(db.String(3), default='USD')
+    status = db.Column(db.String(30), default='completed')
+    metadata_json = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    payer = db.relationship('User', foreign_keys=[payer_id], backref='payments_made')
+    coach = db.relationship('User', foreign_keys=[coach_id], backref='payments_received')
+
+    def to_dict(self):
+        try:
+            metadata = json.loads(self.metadata_json or '{}')
+        except Exception:
+            metadata = {}
+
+        return {
+            'id': self.id,
+            'payer_id': self.payer_id,
+            'coach_id': self.coach_id,
+            'payment_reference': self.payment_reference,
+            'amount': float(self.amount) if self.amount else None,
+            'currency': self.currency,
+            'status': self.status,
+            'metadata': metadata,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
