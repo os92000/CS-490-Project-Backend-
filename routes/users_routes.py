@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, User, UserProfile
+from models import db, User, UserProfile, RoleChangeRequest
 from utils.validators import is_valid_role
 from utils.helpers import success_response, error_response
 from middleware.auth_middleware import require_role
@@ -39,6 +39,13 @@ def update_user_role(user_id):
         # Admin role cannot be self-assigned
         if role == 'admin':
             return error_response('Admin role cannot be self-assigned', 403)
+
+        # Clients upgrading to coach/both must go through the admin approval flow
+        if user.role == 'client' and role in ('coach', 'both'):
+            return error_response(
+                'Submit a role change request for admin approval to become a coach',
+                403
+            )
 
         # Update role
         user.role = role
@@ -185,3 +192,89 @@ def delete_user_account(user_id):
     except Exception as e:
         db.session.rollback()
         return error_response('Failed to delete account', 500, str(e))
+
+
+@users_bp.route('/role-requests', methods=['POST'])
+@jwt_required()
+def submit_role_change_request():
+    """
+    Submit a role change request (client -> coach/both).
+    POST /api/users/role-requests
+    Body: {requested_role: 'coach' | 'both', reason?: string}
+    """
+    try:
+        current_user_id = int(get_jwt_identity())
+        user = User.query.get(current_user_id)
+        if not user:
+            return error_response('User not found', 404)
+
+        # Only clients can submit role change requests via this flow
+        if user.role != 'client':
+            return error_response(
+                'Only clients can submit a role change request',
+                403
+            )
+
+        data = request.get_json() or {}
+        requested_role = data.get('requested_role')
+
+        if requested_role not in ('coach', 'both'):
+            return error_response(
+                "Invalid requested role. Must be 'coach' or 'both'",
+                400
+            )
+
+        # Block duplicates: only one pending request per user at a time
+        existing_pending = RoleChangeRequest.query.filter_by(
+            user_id=current_user_id,
+            status='pending'
+        ).first()
+        if existing_pending:
+            return error_response(
+                'You already have a pending role change request',
+                409
+            )
+
+        req = RoleChangeRequest(
+            user_id=current_user_id,
+            current_role=user.role,
+            requested_role=requested_role,
+            reason=(data.get('reason') or '').strip() or None,
+            status='pending'
+        )
+        db.session.add(req)
+        db.session.commit()
+
+        return success_response(
+            req.to_dict(),
+            'Role change request submitted successfully',
+            201
+        )
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response('Failed to submit role change request', 500, str(e))
+
+
+@users_bp.route('/role-requests/me', methods=['GET'])
+@jwt_required()
+def get_my_role_change_request():
+    """
+    Get the current user's most recent role change request (if any).
+    GET /api/users/role-requests/me
+    """
+    try:
+        current_user_id = int(get_jwt_identity())
+        req = (
+            RoleChangeRequest.query
+            .filter_by(user_id=current_user_id)
+            .order_by(RoleChangeRequest.created_at.desc())
+            .first()
+        )
+        if not req:
+            return success_response(None, 'No role change request found', 200)
+
+        return success_response(req.to_dict(), 'Role change request retrieved', 200)
+
+    except Exception as e:
+        return error_response('Failed to retrieve role change request', 500, str(e))

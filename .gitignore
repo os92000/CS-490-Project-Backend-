@@ -44,3 +44,7 @@ Thumbs.db
 # Local uploads/runtime artifacts
 uploads/
 instance/
+
+# Editor local history
+.history/
+*~

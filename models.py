@@ -102,6 +102,63 @@ class FitnessSurvey(db.Model):
         return f'<FitnessSurvey user_id={self.user_id}>'
 
 
+class RoleChangeRequest(db.Model):
+    """
+    A user's request to change their role (e.g., client wanting to become a coach).
+    Must be approved by an admin before the user's role is updated.
+    """
+    __tablename__ = 'role_change_requests'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    current_role = db.Column(db.String(20))
+    requested_role = db.Column(db.Enum('coach', 'both', name='requested_role_enum'), nullable=False)
+    reason = db.Column(db.Text)
+    status = db.Column(
+        db.Enum('pending', 'approved', 'rejected', name='role_request_status'),
+        default='pending',
+        nullable=False,
+        index=True
+    )
+    admin_notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    reviewed_at = db.Column(db.DateTime)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'))
+
+    user = db.relationship(
+        'User',
+        foreign_keys=[user_id],
+        backref=db.backref('role_change_requests', cascade='all, delete-orphan')
+    )
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by])
+
+    def to_dict(self, include_user=False):
+        data = {
+            'id': self.id,
+            'user_id': self.user_id,
+            'current_role': self.current_role,
+            'requested_role': self.requested_role,
+            'reason': self.reason,
+            'status': self.status,
+            'admin_notes': self.admin_notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
+            'reviewed_by': self.reviewed_by,
+        }
+        if include_user and self.user:
+            data['user_email'] = self.user.email
+            data['user_name'] = None
+            if self.user.profile:
+                first = self.user.profile.first_name or ''
+                last = self.user.profile.last_name or ''
+                full = f'{first} {last}'.strip()
+                data['user_name'] = full or None
+        return data
+
+    def __repr__(self):
+        return f'<RoleChangeRequest user_id={self.user_id} {self.current_role}->{self.requested_role} {self.status}>'
+
+
 # ============================================
 # PHASE 2: Coach Marketplace Models
 # ============================================
@@ -382,6 +439,10 @@ class Exercise(db.Model):
     instructions = db.Column(db.Text)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'))  # NULL for default exercises, user_id for custom
     is_public = db.Column(db.Boolean, default=True)  # Public exercises vs. coach-specific
+    # Workout library fields
+    calories = db.Column(db.Integer)  # Estimated calories burned for a default session
+    default_duration_minutes = db.Column(db.Integer)  # Typical duration of the workout
+    is_library_workout = db.Column(db.Boolean, default=False)  # True = complete workout in the library, False = movement/component
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -400,6 +461,9 @@ class Exercise(db.Model):
             'instructions': self.instructions,
             'created_by': self.created_by,
             'is_public': self.is_public,
+            'calories': self.calories,
+            'default_duration_minutes': self.default_duration_minutes,
+            'is_library_workout': bool(self.is_library_workout),
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
@@ -408,13 +472,14 @@ class Exercise(db.Model):
 
 
 class WorkoutPlan(db.Model):
-    """Workout plans created by coaches for clients"""
+    """Workout plans — created by a coach for a client, or by a client for themselves"""
     __tablename__ = 'workout_plans'
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200), nullable=False)
     description = db.Column(db.Text)
-    coach_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    # coach_id is NULL when a client creates their own plan
+    coach_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=True)
     client_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     start_date = db.Column(db.Date)
     end_date = db.Column(db.Date)
@@ -522,6 +587,12 @@ class WorkoutLog(db.Model):
     client_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     plan_id = db.Column(db.Integer, db.ForeignKey('workout_plans.id', ondelete='SET NULL'))
     workout_day_id = db.Column(db.Integer, db.ForeignKey('workout_days.id', ondelete='SET NULL'))
+    # Library-backed or custom workout fields
+    library_exercise_id = db.Column(db.Integer, db.ForeignKey('exercises.id', ondelete='SET NULL'))
+    workout_name = db.Column(db.String(200))
+    calories_burned = db.Column(db.Integer)
+    exercise_type = db.Column(db.String(50))  # Mirrors Exercise.category for ad-hoc logs
+    muscle_group = db.Column(db.String(100))
     date = db.Column(db.Date, nullable=False)
     duration_minutes = db.Column(db.Integer)
     notes = db.Column(db.Text)
@@ -533,6 +604,7 @@ class WorkoutLog(db.Model):
     client = db.relationship('User', backref='workout_logs')
     plan = db.relationship('WorkoutPlan', backref='logs')
     workout_day = db.relationship('WorkoutDay', backref='logs')
+    library_exercise = db.relationship('Exercise', foreign_keys=[library_exercise_id])
 
     def to_dict(self, include_exercises=False):
         data = {
@@ -540,6 +612,11 @@ class WorkoutLog(db.Model):
             'client_id': self.client_id,
             'plan_id': self.plan_id,
             'workout_day_id': self.workout_day_id,
+            'library_exercise_id': self.library_exercise_id,
+            'workout_name': self.workout_name,
+            'calories_burned': self.calories_burned,
+            'exercise_type': self.exercise_type,
+            'muscle_group': self.muscle_group,
             'date': self.date.isoformat() if self.date else None,
             'duration_minutes': self.duration_minutes,
             'notes': self.notes,
@@ -551,6 +628,8 @@ class WorkoutLog(db.Model):
             data['exercise_logs'] = [ex.to_dict() for ex in self.exercise_logs]
         if self.workout_day:
             data['workout_day'] = self.workout_day.to_dict()
+        if self.library_exercise:
+            data['library_exercise'] = self.library_exercise.to_dict()
         return data
 
     def __repr__(self):

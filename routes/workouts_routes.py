@@ -67,6 +67,40 @@ def get_exercises():
         return error_response('Failed to retrieve exercises', 500, str(e))
 
 
+@workouts_bp.route('/library', methods=['GET'])
+@jwt_required()
+def get_workout_library():
+    """
+    Get all placeholder workouts from the workout library.
+    GET /api/workouts/library
+    Optional filters: ?category=cardio&muscle_group=legs
+    """
+    try:
+        query = Exercise.query.filter_by(is_library_workout=True, is_public=True)
+
+        category = request.args.get('category')
+        if category:
+            query = query.filter_by(category=category)
+
+        muscle_group = request.args.get('muscle_group')
+        if muscle_group:
+            query = query.filter_by(muscle_group=muscle_group)
+
+        workouts = query.order_by(Exercise.category, Exercise.name).all()
+
+        return success_response({
+            'workouts': [w.to_dict() for w in workouts]
+        }, 'Workout library retrieved successfully', 200)
+
+    except Exception as e:
+        import traceback
+        print(f"\n===== ERROR in GET /library =====")
+        print(f"Exception: {str(e)}")
+        print(f"Full traceback:\n{traceback.format_exc()}")
+        print(f"==============================\n")
+        return error_response('Failed to retrieve workout library', 500, str(e))
+
+
 @workouts_bp.route('/exercises', methods=['POST'])
 @jwt_required()
 def create_exercise():
@@ -172,34 +206,52 @@ def get_workout_plan(plan_id):
 @jwt_required()
 def create_workout_plan():
     """
-    Create a workout plan (coach only)
+    Create a workout plan.
     POST /api/workouts/plans
-    Body: {name, description, client_id, start_date, end_date, days: [...]}
+    Body: {name, description, client_id?, start_date, end_date, days: [...]}
+
+    - If client_id is omitted (or equals the current user), a self-plan is created
+      (coach_id = NULL, client_id = current_user).
+    - If client_id is another user, the current user must have an active coach
+      relationship with them, and coach_id is set to the current user.
     """
     try:
         user_id = int(get_jwt_identity())
         data = request.get_json()
 
-        if not data or 'name' not in data or 'client_id' not in data:
-            return error_response('name and client_id are required', 400)
+        if not data or 'name' not in data:
+            return error_response('name is required', 400)
 
-        client_id = data['client_id']
+        raw_client_id = data.get('client_id')
+        # Empty string or missing => self-plan
+        if raw_client_id in (None, '', 0):
+            client_id = user_id
+            coach_id = None
+        else:
+            try:
+                client_id = int(raw_client_id)
+            except (ValueError, TypeError):
+                return error_response('Invalid client_id', 400)
 
-        # Verify coach-client relationship exists
-        relationship = CoachRelationship.query.filter_by(
-            coach_id=user_id,
-            client_id=client_id,
-            status='active'
-        ).first()
-
-        if not relationship:
-            return error_response('No active relationship with this client', 403)
+            if client_id == user_id:
+                # User explicitly set themselves as client — treat as self-plan
+                coach_id = None
+            else:
+                # Creating for another user — must be an active coach
+                relationship = CoachRelationship.query.filter_by(
+                    coach_id=user_id,
+                    client_id=client_id,
+                    status='active'
+                ).first()
+                if not relationship:
+                    return error_response('No active relationship with this client', 403)
+                coach_id = user_id
 
         # Create plan
         plan = WorkoutPlan(
             name=data['name'],
             description=data.get('description'),
-            coach_id=user_id,
+            coach_id=coach_id,
             client_id=client_id,
             start_date=datetime.fromisoformat(data['start_date']).date() if data.get('start_date') else None,
             end_date=datetime.fromisoformat(data['end_date']).date() if data.get('end_date') else None
@@ -242,14 +294,30 @@ def create_workout_plan():
 
     except Exception as e:
         db.session.rollback()
+        import traceback
+        print(f"\n===== ERROR in POST /plans =====")
+        print(f"Exception: {str(e)}")
+        print(f"Full traceback:\n{traceback.format_exc()}")
+        print(f"==============================\n")
         return error_response('Failed to create workout plan', 500, str(e))
+
+
+def _user_can_modify_plan(plan, user_id):
+    """
+    The plan owner can modify it.
+    Owner = coach_id if set (coach-created plan), otherwise client_id (self-created).
+    """
+    if plan.coach_id is not None:
+        return plan.coach_id == user_id
+    return plan.client_id == user_id
 
 
 @workouts_bp.route('/plans/<int:plan_id>', methods=['PUT'])
 @jwt_required()
 def update_workout_plan(plan_id):
     """
-    Update a workout plan (coach only)
+    Update a workout plan. Only the owner (coach if coach-created, else the
+    client who created it) can modify.
     PUT /api/workouts/plans/{plan_id}
     Body: {name, description, start_date, end_date, status}
     """
@@ -261,9 +329,8 @@ def update_workout_plan(plan_id):
         if not plan:
             return error_response('Workout plan not found', 404)
 
-        # Only coach can update
-        if plan.coach_id != user_id:
-            return error_response('Only the coach can update this plan', 403)
+        if not _user_can_modify_plan(plan, user_id):
+            return error_response('Only the plan owner can update this plan', 403)
 
         # Update fields
         if 'name' in data:
@@ -290,7 +357,7 @@ def update_workout_plan(plan_id):
 @jwt_required()
 def delete_workout_plan(plan_id):
     """
-    Delete a workout plan (coach only)
+    Delete a workout plan. Only the owner can delete.
     DELETE /api/workouts/plans/{plan_id}
     """
     try:
@@ -300,9 +367,8 @@ def delete_workout_plan(plan_id):
         if not plan:
             return error_response('Workout plan not found', 404)
 
-        # Only coach can delete
-        if plan.coach_id != user_id:
-            return error_response('Only the coach can delete this plan', 403)
+        if not _user_can_modify_plan(plan, user_id):
+            return error_response('Only the plan owner can delete this plan', 403)
 
         db.session.delete(plan)
         db.session.commit()
@@ -361,7 +427,11 @@ def create_workout_log():
     """
     Log a completed workout
     POST /api/workouts/logs
-    Body: {plan_id, workout_day_id, date, duration_minutes, notes, rating, exercises: [...]}
+    Body: {
+      plan_id, workout_day_id, date, duration_minutes, notes, rating,
+      library_exercise_id, workout_name, calories_burned, exercise_type, muscle_group,
+      exercises: [...]
+    }
     """
     try:
         user_id = int(get_jwt_identity())
@@ -373,28 +443,50 @@ def create_workout_log():
         # Convert empty strings to None for foreign keys
         plan_id = data.get('plan_id') or None
         workout_day_id = data.get('workout_day_id') or None
+        library_exercise_id = data.get('library_exercise_id') or None
 
-        # Convert duration_minutes to int if provided
-        duration_minutes = None
-        if data.get('duration_minutes'):
+        def _to_int(value):
+            if value in (None, ''):
+                return None
             try:
-                duration_minutes = int(data['duration_minutes'])
+                return int(value)
             except (ValueError, TypeError):
-                duration_minutes = None
+                return None
 
-        # Convert rating to int if provided
-        rating = None
-        if data.get('rating'):
-            try:
-                rating = int(data['rating'])
-            except (ValueError, TypeError):
-                rating = None
+        duration_minutes = _to_int(data.get('duration_minutes'))
+        rating = _to_int(data.get('rating'))
+        calories_burned = _to_int(data.get('calories_burned'))
+        library_exercise_id = _to_int(library_exercise_id)
+
+        # If a library exercise is referenced, prefer its values when the client
+        # didn't supply their own.
+        workout_name = data.get('workout_name')
+        exercise_type = data.get('exercise_type')
+        muscle_group = data.get('muscle_group')
+        if library_exercise_id:
+            lib_exercise = Exercise.query.get(library_exercise_id)
+            if lib_exercise and lib_exercise.is_library_workout:
+                if not workout_name:
+                    workout_name = lib_exercise.name
+                if not exercise_type:
+                    exercise_type = lib_exercise.category
+                if not muscle_group:
+                    muscle_group = lib_exercise.muscle_group
+                if calories_burned is None:
+                    calories_burned = lib_exercise.calories
+                if duration_minutes is None:
+                    duration_minutes = lib_exercise.default_duration_minutes
 
         # Create workout log
         log = WorkoutLog(
             client_id=user_id,
             plan_id=plan_id,
             workout_day_id=workout_day_id,
+            library_exercise_id=library_exercise_id,
+            workout_name=workout_name or None,
+            calories_burned=calories_burned,
+            exercise_type=exercise_type or None,
+            muscle_group=muscle_group or None,
             date=datetime.fromisoformat(data['date']).date(),
             duration_minutes=duration_minutes,
             notes=data.get('notes'),
