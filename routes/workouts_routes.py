@@ -288,6 +288,13 @@ def get_workout_plans():
         else:
             plans = WorkoutPlan.query.filter_by(client_id=user_id).all()
 
+        metadata_by_plan_id = {}
+        if plans:
+            metadata_rows = WorkoutPlanMetadata.query.filter(
+                WorkoutPlanMetadata.plan_id.in_([plan.id for plan in plans])
+            ).all()
+            metadata_by_plan_id = {row.plan_id: row for row in metadata_rows}
+
         goal = request.args.get('goal')
         difficulty = request.args.get('difficulty')
         plan_type = request.args.get('plan_type')
@@ -296,7 +303,7 @@ def get_workout_plans():
         if any([goal, difficulty, plan_type, duration_weeks]):
             filtered_plans = []
             for plan in plans:
-                metadata = WorkoutPlanMetadata.query.filter_by(plan_id=plan.id).first()
+                metadata = metadata_by_plan_id.get(plan.id)
                 if goal and (not metadata or goal.lower() not in (metadata.goal or '').lower()):
                     continue
                 if difficulty and (not metadata or metadata.difficulty != difficulty):
@@ -312,7 +319,11 @@ def get_workout_plans():
         plans_data = []
         for plan in plans:
             try:
-                plans_data.append(plan.to_dict())
+                payload = plan.to_dict()
+                metadata = metadata_by_plan_id.get(plan.id)
+                if metadata:
+                    payload.update(metadata.to_dict())
+                plans_data.append(payload)
             except Exception as plan_error:
                 print(f"Error serializing plan {plan.id}: {str(plan_error)}")
                 continue
@@ -599,7 +610,7 @@ def get_workout_logs():
         logs = query.order_by(WorkoutLog.date.desc()).all()
 
         return success_response({
-            'logs': [log.to_dict(include_exercises=True) for log in logs]
+            'logs': [log.to_dict() for log in logs]
         }, 'Workout logs retrieved successfully', 200)
 
     except Exception as e:

@@ -785,6 +785,12 @@ class WorkoutLog(db.Model):
         }
         if include_exercises:
             data['exercise_logs'] = [ex.to_dict() for ex in self.exercise_logs]
+        if self.plan:
+            data['plan'] = {
+                'id': self.plan.id,
+                'name': self.plan.name,
+                'title': self.plan.name
+            }
         if self.workout_day:
             data['workout_day'] = self.workout_day.to_dict()
         if self.library_exercise:

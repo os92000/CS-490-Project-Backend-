@@ -177,11 +177,14 @@ def workout_summary():
         total_duration = sum(int(log.duration_minutes or 0) for log in logs)
         ratings = [int(log.rating) for log in logs if log.rating is not None]
         avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
+        period_days = max((end_date - start_date).days + 1, 1)
+        workout_frequency_per_week = round((total_workouts / period_days) * 7, 1)
 
         return success_response({
             'total_workouts': total_workouts,
             'total_duration_minutes': int(total_duration),
             'average_rating': avg_rating,
+            'workout_frequency_per_week': workout_frequency_per_week,
             'period': period,
             'start_date': start_date.isoformat(),
             'end_date': end_date.isoformat(),
@@ -206,11 +209,19 @@ def nutrition_summary():
             MealLog.date <= end_date
         ).all()
 
-        calories = [int(log.calories) for log in meal_logs if log.calories is not None]
-        avg_calories = round(sum(calories) / len(calories), 2) if calories else None
+        period_days = max((end_date - start_date).days + 1, 1)
+        total_calories = sum(int(log.calories or 0) for log in meal_logs)
+        total_protein = sum(float(log.protein_g or 0) for log in meal_logs)
+        total_carbs = sum(float(log.carbs_g or 0) for log in meal_logs)
+
+        avg_calories = round(total_calories / period_days, 2)
+        avg_protein = round(total_protein / period_days, 2)
+        avg_carbs = round(total_carbs / period_days, 2)
 
         return success_response({
             'average_daily_calories': avg_calories,
+            'average_protein_g': avg_protein,
+            'average_carbs_g': avg_carbs,
             'period': period,
             'start_date': start_date.isoformat(),
             'end_date': end_date.isoformat(),
