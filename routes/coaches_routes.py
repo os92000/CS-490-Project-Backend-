@@ -16,6 +16,7 @@ from models import (
     Review,
     FitnessSurvey,
     WorkoutLog,
+    WorkoutPlan,
     BodyMetric,
     WellnessLog,
     CoachApplication,
