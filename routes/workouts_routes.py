@@ -16,7 +16,6 @@ from models import (
     WorkoutPlanMetadata,
     WorkoutTemplate,
     WorkoutPlanAssignment,
-    CalendarNote,
 )
 from utils.helpers import success_response, error_response
 from datetime import datetime, date, timedelta
