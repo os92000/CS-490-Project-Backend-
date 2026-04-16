@@ -74,10 +74,47 @@ def _ics_fold(line):
 
 
 def _build_workout_ics(user_id, host_url):
-    """Build an iCalendar (.ics) document covering assignments + logs for a user."""
+    """Build an iCalendar (.ics) document covering scheduled days + assignments + logs for a user."""
     today = date.today()
     window_start = today - timedelta(days=180)
     window_end = today + timedelta(days=365)
+
+    # Auto-distributed scheduled days from plans with date ranges
+    plans = WorkoutPlan.query.filter_by(client_id=user_id, status="active").all()
+    scheduled_days = []
+
+    for plan in plans:
+        if not plan.start_date or not plan.end_date:
+            continue
+        days = (
+            WorkoutDay.query.filter_by(plan_id=plan.id)
+            .order_by(WorkoutDay.day_number)
+            .all()
+        )
+        if not days:
+            continue
+        total_days = len(days)
+        span = (plan.end_date - plan.start_date).days
+        for i, day in enumerate(days):
+            if total_days == 1:
+                scheduled_date = plan.start_date
+            else:
+                scheduled_date = plan.start_date + timedelta(
+                    days=round(span * i / (total_days - 1))
+                )
+            if scheduled_date < window_start or scheduled_date > window_end:
+                continue
+            exercises = PlanExercise.query.filter_by(workout_day_id=day.id).all()
+            scheduled_days.append(
+                {
+                    "plan_name": plan.name,
+                    "plan_description": plan.description,
+                    "day_name": day.name,
+                    "day_notes": day.notes,
+                    "scheduled_date": scheduled_date,
+                    "exercises": exercises,
+                }
+            )
 
     assignments = WorkoutPlanAssignment.query.filter(
         WorkoutPlanAssignment.user_id == user_id,
@@ -105,6 +142,61 @@ def _build_workout_ics(user_id, host_url):
         "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
         "X-PUBLISHED-TTL:PT1H",
     ]
+
+    for sd in scheduled_days:
+        dt = sd["scheduled_date"]
+        dt_next = dt + timedelta(days=1)
+        plan_name = sd["plan_name"]
+        day_name = sd["day_name"]
+        summary = f"💪 {plan_name}"
+        if day_name:
+            summary = f"💪 {plan_name} — {day_name}"
+
+        desc_parts = []
+        if sd["plan_description"]:
+            desc_parts.append(sd["plan_description"])
+        if day_name:
+            desc_parts.append(f"Day: {day_name}")
+        if sd["day_notes"]:
+            desc_parts.append(sd["day_notes"])
+        if sd["exercises"]:
+            ex_list = []
+            for ex in sd["exercises"]:
+                ex_name = ex.exercise.name if ex.exercise else "Unknown"
+                ex_detail = ex_name
+                if ex.sets:
+                    ex_detail += f" — {ex.sets} sets"
+                if ex.reps:
+                    ex_detail += f" x {ex.reps}"
+                ex_list.append(ex_detail)
+            desc_parts.append("Exercises:\n" + "\n".join(ex_list))
+        desc_parts.append(f"View in FitApp: {host_url.rstrip('/')}/my-workouts")
+        description = "\n".join(desc_parts)
+
+        uid = f"scheduled-{hashlib.md5(f'{plan_name}-{day_name}-{dt}'.encode()).hexdigest()[:12]}@fitapp"
+
+        lines.extend(
+            [
+                "BEGIN:VEVENT",
+                _ics_fold(f"UID:{uid}"),
+                f"DTSTAMP:{now_utc}",
+                f"DTSTART;VALUE=DATE:{dt.strftime('%Y%m%d')}",
+                f"DTEND;VALUE=DATE:{dt_next.strftime('%Y%m%d')}",
+                _ics_fold(f"SUMMARY:{_ics_escape(summary)}"),
+                _ics_fold(f"DESCRIPTION:{_ics_escape(description)}"),
+                "CATEGORIES:Workout,Fitness",
+                "STATUS:CONFIRMED",
+                "TRANSP:OPAQUE",
+                "BEGIN:VALARM",
+                "ACTION:DISPLAY",
+                _ics_fold(
+                    f"DESCRIPTION:{_ics_escape('Workout reminder: ' + plan_name)}"
+                ),
+                "TRIGGER:-PT30M",
+                "END:VALARM",
+                "END:VEVENT",
+            ]
+        )
 
     for a in assignments:
         dt = a.assigned_date
@@ -536,6 +628,14 @@ def get_workout_plans():
                 metadata = metadata_by_plan_id.get(plan.id)
                 if metadata:
                     payload.update(metadata.to_dict())
+                if plan.client:
+                    payload["client"] = {
+                        "id": plan.client.id,
+                        "email": plan.client.email,
+                        "profile": plan.client.profile.to_dict()
+                        if plan.client.profile
+                        else None,
+                    }
                 plans_data.append(payload)
             except Exception as plan_error:
                 print(f"Error serializing plan {plan.id}: {str(plan_error)}")
@@ -1086,6 +1186,12 @@ def get_workout_calendar():
     """
     Get workout calendar for a month
     GET /api/workouts/calendar?year=2024&month=1
+
+    Returns:
+      - logs: completed workout sessions
+      - scheduled_days: auto-distributed workout days from plans with date ranges
+      - plans_without_dates: active plans that have no start/end date
+      - notes: calendar notes for the month
     """
     try:
         user_id = int(get_jwt_identity())
@@ -1093,32 +1199,95 @@ def get_workout_calendar():
         year = request.args.get("year", datetime.now().year, type=int)
         month = request.args.get("month", datetime.now().month, type=int)
 
-        # Get first and last day of the month
         from calendar import monthrange
 
         first_day = date(year, month, 1)
         last_day = date(year, month, monthrange(year, month)[1])
 
-        # Get workout logs for the month
+        # Completed workout logs
         logs = WorkoutLog.query.filter(
             WorkoutLog.client_id == user_id,
             WorkoutLog.date >= first_day,
             WorkoutLog.date <= last_day,
         ).all()
 
-        # Get active workout plans
+        # Active workout plans for this user
         plans = WorkoutPlan.query.filter_by(client_id=user_id, status="active").all()
-        assignments = WorkoutPlanAssignment.query.filter(
-            WorkoutPlanAssignment.user_id == user_id,
-            WorkoutPlanAssignment.assigned_date >= first_day,
-            WorkoutPlanAssignment.assigned_date <= last_day,
-        ).all()
+
+        # Auto-distribute workout days for plans that have a date range
+        scheduled_days = []
+        plans_without_dates = []
+
+        for plan in plans:
+            if not plan.start_date or not plan.end_date:
+                plans_without_dates.append(plan.to_dict())
+                continue
+
+            days = (
+                WorkoutDay.query.filter_by(plan_id=plan.id)
+                .order_by(WorkoutDay.day_number)
+                .all()
+            )
+            if not days:
+                continue
+
+            total_days = len(days)
+            span = (plan.end_date - plan.start_date).days
+
+            for i, day in enumerate(days):
+                if total_days == 1:
+                    scheduled_date = plan.start_date
+                else:
+                    scheduled_date = plan.start_date + timedelta(
+                        days=round(span * i / (total_days - 1))
+                    )
+
+                if scheduled_date < first_day or scheduled_date > last_day:
+                    continue
+
+                exercises = PlanExercise.query.filter_by(workout_day_id=day.id).all()
+                scheduled_days.append(
+                    {
+                        "id": f"scheduled-{plan.id}-{day.id}",
+                        "plan_id": plan.id,
+                        "plan_name": plan.name,
+                        "plan_description": plan.description,
+                        "day_id": day.id,
+                        "day_name": day.name,
+                        "day_number": day.day_number,
+                        "day_notes": day.notes,
+                        "scheduled_date": scheduled_date.isoformat(),
+                        "exercises": [
+                            {
+                                "name": ex.exercise.name if ex.exercise else "Unknown",
+                                "sets": ex.sets,
+                                "reps": ex.reps,
+                                "weight": ex.weight,
+                                "rest_seconds": ex.rest_seconds,
+                                "notes": ex.notes,
+                            }
+                            for ex in exercises
+                        ],
+                    }
+                )
+
+        # Calendar notes for the month
+        notes = (
+            CalendarNote.query.filter(
+                CalendarNote.user_id == user_id,
+                CalendarNote.date >= first_day,
+                CalendarNote.date <= last_day,
+            )
+            .order_by(CalendarNote.date)
+            .all()
+        )
 
         return success_response(
             {
                 "logs": [log.to_dict() for log in logs],
-                "plans": [plan.to_dict() for plan in plans],
-                "assignments": [assignment.to_dict() for assignment in assignments],
+                "scheduled_days": scheduled_days,
+                "plans_without_dates": plans_without_dates,
+                "notes": [note.to_dict() for note in notes],
             },
             "Calendar data retrieved successfully",
             200,
@@ -1126,6 +1295,81 @@ def get_workout_calendar():
 
     except Exception as e:
         return error_response("Failed to retrieve calendar data", 500, str(e))
+
+
+@workouts_bp.route("/calendar/notes", methods=["POST"])
+@jwt_required()
+def create_calendar_note():
+    """
+    Add a note to a calendar date
+    POST /api/workouts/calendar/notes
+    Body: { "date": "2024-01-15", "note": "Rest day - focus on recovery" }
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        data = request.get_json()
+
+        if not data.get("date") or not data.get("note"):
+            return error_response("Date and note are required", 400)
+
+        note_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+        note = CalendarNote(user_id=user_id, date=note_date, note=data["note"])
+        db.session.add(note)
+        db.session.commit()
+
+        return success_response(note.to_dict(), "Note added", 201)
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response("Failed to add note", 500, str(e))
+
+
+@workouts_bp.route("/calendar/notes", methods=["GET"])
+@jwt_required()
+def get_calendar_notes():
+    """
+    Get calendar notes for the current user
+    GET /api/workouts/calendar/notes?date=2024-01-15 (optional date filter)
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        date_filter = request.args.get("date")
+
+        query = CalendarNote.query.filter_by(user_id=user_id)
+        if date_filter:
+            note_date = datetime.strptime(date_filter, "%Y-%m-%d").date()
+            query = query.filter_by(date=note_date)
+
+        notes = query.order_by(CalendarNote.date.desc()).all()
+        return success_response(
+            {"notes": [n.to_dict() for n in notes]}, "Notes retrieved", 200
+        )
+
+    except Exception as e:
+        return error_response("Failed to retrieve notes", 500, str(e))
+
+
+@workouts_bp.route("/calendar/notes/<int:note_id>", methods=["DELETE"])
+@jwt_required()
+def delete_calendar_note(note_id):
+    """
+    Delete a calendar note
+    DELETE /api/workouts/calendar/notes/<note_id>
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        note = CalendarNote.query.filter_by(id=note_id, user_id=user_id).first()
+
+        if not note:
+            return error_response("Note not found", 404)
+
+        db.session.delete(note)
+        db.session.commit()
+        return success_response(None, "Note deleted", 200)
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response("Failed to delete note", 500, str(e))
 
 
 @workouts_bp.route("/stats", methods=["GET"])
