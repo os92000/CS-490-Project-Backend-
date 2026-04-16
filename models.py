@@ -2,6 +2,7 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import json
+from sqlalchemy.orm import synonym
 
 db = SQLAlchemy()
 
@@ -963,7 +964,8 @@ class DailyMetric(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    date = db.Column(db.Date, nullable=False)
+    log_date = db.Column('log_date', db.Date, nullable=False)
+    date = synonym('log_date')
     steps = db.Column(db.Integer)
     calories_burned = db.Column(db.Integer)
     water_intake_ml = db.Column(db.Integer)
@@ -991,7 +993,8 @@ class MealPlan(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    title = db.Column(db.String(200), nullable=False)
+    name = db.Column('name', db.String(255), nullable=False)
+    title = synonym('name')
     notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
