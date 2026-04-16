@@ -3,32 +3,46 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from itsdangerous import URLSafeSerializer, BadSignature
 import json
 import hashlib
-from models import db, User, Exercise, WorkoutPlan, WorkoutDay, PlanExercise, WorkoutLog, ExerciseLog, CoachRelationship, WorkoutPlanMetadata, WorkoutTemplate, WorkoutPlanAssignment
+from models import (
+    db,
+    User,
+    Exercise,
+    WorkoutPlan,
+    WorkoutDay,
+    PlanExercise,
+    WorkoutLog,
+    ExerciseLog,
+    CoachRelationship,
+    WorkoutPlanMetadata,
+    WorkoutTemplate,
+    WorkoutPlanAssignment,
+)
 from utils.helpers import success_response, error_response
 from datetime import datetime, date, timedelta
 from sqlalchemy import or_, and_
 
-workouts_bp = Blueprint('workouts', __name__, url_prefix='/api/workouts')
+workouts_bp = Blueprint("workouts", __name__, url_prefix="/api/workouts")
 
 
 # ============================================
 # Calendar Feed Token Helpers
 # ============================================
 
+
 def _feed_serializer():
     """Signed serializer used for subscription feed tokens (stateless)."""
-    secret = current_app.config.get('SECRET_KEY', 'dev-secret')
-    return URLSafeSerializer(secret, salt='workout-calendar-feed')
+    secret = current_app.config.get("SECRET_KEY", "dev-secret")
+    return URLSafeSerializer(secret, salt="workout-calendar-feed")
 
 
 def _make_feed_token(user_id):
-    return _feed_serializer().dumps({'uid': int(user_id)})
+    return _feed_serializer().dumps({"uid": int(user_id)})
 
 
 def _parse_feed_token(token):
     try:
         data = _feed_serializer().loads(token)
-        return int(data.get('uid'))
+        return int(data.get("uid"))
     except (BadSignature, TypeError, ValueError):
         return None
 
@@ -36,14 +50,14 @@ def _parse_feed_token(token):
 def _ics_escape(value):
     """Escape a value for inclusion in an iCal text field (RFC 5545)."""
     if value is None:
-        return ''
+        return ""
     return (
         str(value)
-        .replace('\\', '\\\\')
-        .replace(';', '\\;')
-        .replace(',', '\\,')
-        .replace('\r\n', '\\n')
-        .replace('\n', '\\n')
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
     )
 
 
@@ -54,9 +68,9 @@ def _ics_fold(line):
     chunks = [line[:75]]
     rest = line[75:]
     while rest:
-        chunks.append(' ' + rest[:74])
+        chunks.append(" " + rest[:74])
         rest = rest[74:]
-    return '\r\n'.join(chunks)
+    return "\r\n".join(chunks)
 
 
 def _build_workout_ics(user_id, host_url):
@@ -77,25 +91,25 @@ def _build_workout_ics(user_id, host_url):
         WorkoutLog.date <= window_end,
     ).all()
 
-    now_utc = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    now_utc = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
     lines = [
-        'BEGIN:VCALENDAR',
-        'VERSION:2.0',
-        'PRODID:-//FitApp//Workout Calendar//EN',
-        'CALSCALE:GREGORIAN',
-        'METHOD:PUBLISH',
-        'X-WR-CALNAME:FitApp Workouts',
-        'X-WR-CALDESC:Your FitApp workout schedule and completed sessions',
-        'X-WR-TIMEZONE:UTC',
-        'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
-        'X-PUBLISHED-TTL:PT1H',
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//FitApp//Workout Calendar//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "X-WR-CALNAME:FitApp Workouts",
+        "X-WR-CALDESC:Your FitApp workout schedule and completed sessions",
+        "X-WR-TIMEZONE:UTC",
+        "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
+        "X-PUBLISHED-TTL:PT1H",
     ]
 
     for a in assignments:
         dt = a.assigned_date
         dt_next = dt + timedelta(days=1)
-        plan_name = a.plan.name if a.plan else 'Workout'
+        plan_name = a.plan.name if a.plan else "Workout"
         day_name = a.workout_day.name if a.workout_day else None
         summary = f"💪 {plan_name}"
         if day_name:
@@ -109,33 +123,37 @@ def _build_workout_ics(user_id, host_url):
         if a.workout_day and a.workout_day.notes:
             desc_parts.append(a.workout_day.notes)
         desc_parts.append(f"View in FitApp: {host_url.rstrip('/')}/my-workouts")
-        description = '\n'.join(desc_parts)
+        description = "\n".join(desc_parts)
 
         uid = f"assignment-{a.id}-{hashlib.md5(str(a.id).encode()).hexdigest()[:8]}@fitapp"
 
-        lines.extend([
-            'BEGIN:VEVENT',
-            _ics_fold(f'UID:{uid}'),
-            f'DTSTAMP:{now_utc}',
-            f'DTSTART;VALUE=DATE:{dt.strftime("%Y%m%d")}',
-            f'DTEND;VALUE=DATE:{dt_next.strftime("%Y%m%d")}',
-            _ics_fold(f'SUMMARY:{_ics_escape(summary)}'),
-            _ics_fold(f'DESCRIPTION:{_ics_escape(description)}'),
-            'CATEGORIES:Workout,Fitness',
-            'STATUS:CONFIRMED',
-            'TRANSP:OPAQUE',
-            'BEGIN:VALARM',
-            'ACTION:DISPLAY',
-            _ics_fold(f'DESCRIPTION:{_ics_escape("Workout reminder: " + plan_name)}'),
-            'TRIGGER:-PT30M',
-            'END:VALARM',
-            'END:VEVENT',
-        ])
+        lines.extend(
+            [
+                "BEGIN:VEVENT",
+                _ics_fold(f"UID:{uid}"),
+                f"DTSTAMP:{now_utc}",
+                f"DTSTART;VALUE=DATE:{dt.strftime('%Y%m%d')}",
+                f"DTEND;VALUE=DATE:{dt_next.strftime('%Y%m%d')}",
+                _ics_fold(f"SUMMARY:{_ics_escape(summary)}"),
+                _ics_fold(f"DESCRIPTION:{_ics_escape(description)}"),
+                "CATEGORIES:Workout,Fitness",
+                "STATUS:CONFIRMED",
+                "TRANSP:OPAQUE",
+                "BEGIN:VALARM",
+                "ACTION:DISPLAY",
+                _ics_fold(
+                    f"DESCRIPTION:{_ics_escape('Workout reminder: ' + plan_name)}"
+                ),
+                "TRIGGER:-PT30M",
+                "END:VALARM",
+                "END:VEVENT",
+            ]
+        )
 
     for log in logs:
         dt = log.date
         dt_next = dt + timedelta(days=1)
-        title = log.workout_name or (log.plan.name if log.plan else 'Workout session')
+        title = log.workout_name or (log.plan.name if log.plan else "Workout session")
         summary = f"✅ {title}"
 
         desc_parts = []
@@ -149,32 +167,36 @@ def _build_workout_ics(user_id, host_url):
             desc_parts.append(f"Muscle group: {log.muscle_group}")
         if log.notes:
             desc_parts.append(log.notes)
-        description = '\n'.join(desc_parts) if desc_parts else 'Completed workout'
+        description = "\n".join(desc_parts) if desc_parts else "Completed workout"
 
         uid = f"log-{log.id}-{hashlib.md5(str(log.id).encode()).hexdigest()[:8]}@fitapp"
 
-        lines.extend([
-            'BEGIN:VEVENT',
-            _ics_fold(f'UID:{uid}'),
-            f'DTSTAMP:{now_utc}',
-            f'DTSTART;VALUE=DATE:{dt.strftime("%Y%m%d")}',
-            f'DTEND;VALUE=DATE:{dt_next.strftime("%Y%m%d")}',
-            _ics_fold(f'SUMMARY:{_ics_escape(summary)}'),
-            _ics_fold(f'DESCRIPTION:{_ics_escape(description)}'),
-            'CATEGORIES:Workout,Completed',
-            'STATUS:CONFIRMED',
-            'TRANSP:TRANSPARENT',
-            'END:VEVENT',
-        ])
+        lines.extend(
+            [
+                "BEGIN:VEVENT",
+                _ics_fold(f"UID:{uid}"),
+                f"DTSTAMP:{now_utc}",
+                f"DTSTART;VALUE=DATE:{dt.strftime('%Y%m%d')}",
+                f"DTEND;VALUE=DATE:{dt_next.strftime('%Y%m%d')}",
+                _ics_fold(f"SUMMARY:{_ics_escape(summary)}"),
+                _ics_fold(f"DESCRIPTION:{_ics_escape(description)}"),
+                "CATEGORIES:Workout,Completed",
+                "STATUS:CONFIRMED",
+                "TRANSP:TRANSPARENT",
+                "END:VEVENT",
+            ]
+        )
 
-    lines.append('END:VCALENDAR')
-    return '\r\n'.join(lines)
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines)
+
 
 # ============================================
 # Exercise Management
 # ============================================
 
-@workouts_bp.route('/exercises', methods=['GET'])
+
+@workouts_bp.route("/exercises", methods=["GET"])
 @jwt_required()
 def get_exercises():
     """
@@ -188,49 +210,49 @@ def get_exercises():
         query = Exercise.query
 
         # Filter by category
-        category = request.args.get('category')
+        category = request.args.get("category")
         if category:
             query = query.filter_by(category=category)
 
         # Filter by muscle group
-        muscle_group = request.args.get('muscle_group')
+        muscle_group = request.args.get("muscle_group")
         if muscle_group:
             query = query.filter_by(muscle_group=muscle_group)
 
         # Filter by difficulty
-        difficulty = request.args.get('difficulty')
+        difficulty = request.args.get("difficulty")
         if difficulty:
             query = query.filter_by(difficulty=difficulty)
 
         # Search by name
-        search = request.args.get('search')
+        search = request.args.get("search")
         if search:
-            query = query.filter(Exercise.name.ilike(f'%{search}%'))
+            query = query.filter(Exercise.name.ilike(f"%{search}%"))
 
         # Only show public exercises or user's own exercises
         query = query.filter(
-            or_(
-                Exercise.is_public == True,
-                Exercise.created_by == user_id
-            )
+            or_(Exercise.is_public == True, Exercise.created_by == user_id)
         )
 
         exercises = query.all()
 
-        return success_response({
-            'exercises': [ex.to_dict() for ex in exercises]
-        }, 'Exercises retrieved successfully', 200)
+        return success_response(
+            {"exercises": [ex.to_dict() for ex in exercises]},
+            "Exercises retrieved successfully",
+            200,
+        )
 
     except Exception as e:
         import traceback
+
         print(f"\n===== ERROR in GET /exercises =====")
         print(f"Exception: {str(e)}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         print(f"==============================\n")
-        return error_response('Failed to retrieve exercises', 500, str(e))
+        return error_response("Failed to retrieve exercises", 500, str(e))
 
 
-@workouts_bp.route('/library', methods=['GET'])
+@workouts_bp.route("/library", methods=["GET"])
 @jwt_required()
 def get_workout_library():
     """
@@ -241,30 +263,33 @@ def get_workout_library():
     try:
         query = Exercise.query.filter_by(is_library_workout=True, is_public=True)
 
-        category = request.args.get('category')
+        category = request.args.get("category")
         if category:
             query = query.filter_by(category=category)
 
-        muscle_group = request.args.get('muscle_group')
+        muscle_group = request.args.get("muscle_group")
         if muscle_group:
             query = query.filter_by(muscle_group=muscle_group)
 
         workouts = query.order_by(Exercise.category, Exercise.name).all()
 
-        return success_response({
-            'workouts': [w.to_dict() for w in workouts]
-        }, 'Workout library retrieved successfully', 200)
+        return success_response(
+            {"workouts": [w.to_dict() for w in workouts]},
+            "Workout library retrieved successfully",
+            200,
+        )
 
     except Exception as e:
         import traceback
+
         print(f"\n===== ERROR in GET /library =====")
         print(f"Exception: {str(e)}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         print(f"==============================\n")
-        return error_response('Failed to retrieve workout library', 500, str(e))
+        return error_response("Failed to retrieve workout library", 500, str(e))
 
 
-@workouts_bp.route('/exercises', methods=['POST'])
+@workouts_bp.route("/exercises", methods=["POST"])
 @jwt_required()
 def create_exercise():
     """
@@ -276,33 +301,35 @@ def create_exercise():
         user_id = int(get_jwt_identity())
         data = request.get_json()
 
-        if not data or 'name' not in data:
-            return error_response('Exercise name is required', 400)
+        if not data or "name" not in data:
+            return error_response("Exercise name is required", 400)
 
         exercise = Exercise(
-            name=data['name'],
-            description=data.get('description'),
-            category=data.get('category'),
-            muscle_group=data.get('muscle_group'),
-            equipment=data.get('equipment'),
-            difficulty=data.get('difficulty'),
-            video_url=data.get('video_url'),
-            instructions=data.get('instructions'),
+            name=data["name"],
+            description=data.get("description"),
+            category=data.get("category"),
+            muscle_group=data.get("muscle_group"),
+            equipment=data.get("equipment"),
+            difficulty=data.get("difficulty"),
+            video_url=data.get("video_url"),
+            instructions=data.get("instructions"),
             created_by=user_id,
-            is_public=data.get('is_public', False)
+            is_public=data.get("is_public", False),
         )
 
         db.session.add(exercise)
         db.session.commit()
 
-        return success_response(exercise.to_dict(), 'Exercise created successfully', 201)
+        return success_response(
+            exercise.to_dict(), "Exercise created successfully", 201
+        )
 
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to create exercise', 500, str(e))
+        return error_response("Failed to create exercise", 500, str(e))
 
 
-@workouts_bp.route('/templates', methods=['GET', 'POST'])
+@workouts_bp.route("/templates", methods=["GET", "POST"])
 @jwt_required()
 def workout_templates():
     """
@@ -313,54 +340,61 @@ def workout_templates():
     try:
         user_id = int(get_jwt_identity())
 
-        if request.method == 'GET':
+        if request.method == "GET":
             query = WorkoutTemplate.query.filter(
                 or_(
-                    and_(WorkoutTemplate.is_public == True, WorkoutTemplate.approved == True),
-                    WorkoutTemplate.created_by == user_id
+                    and_(
+                        WorkoutTemplate.is_public == True,
+                        WorkoutTemplate.approved == True,
+                    ),
+                    WorkoutTemplate.created_by == user_id,
                 )
             )
 
-            goal = request.args.get('goal')
-            difficulty = request.args.get('difficulty')
-            plan_type = request.args.get('plan_type')
+            goal = request.args.get("goal")
+            difficulty = request.args.get("difficulty")
+            plan_type = request.args.get("plan_type")
             if goal:
-                query = query.filter(WorkoutTemplate.goal.ilike(f'%{goal}%'))
+                query = query.filter(WorkoutTemplate.goal.ilike(f"%{goal}%"))
             if difficulty:
                 query = query.filter_by(difficulty=difficulty)
             if plan_type:
                 query = query.filter_by(plan_type=plan_type)
 
             templates = query.order_by(WorkoutTemplate.created_at.desc()).all()
-            return success_response({
-                'templates': [template.to_dict() for template in templates]
-            }, 'Workout templates retrieved successfully', 200)
+            return success_response(
+                {"templates": [template.to_dict() for template in templates]},
+                "Workout templates retrieved successfully",
+                200,
+            )
 
         data = request.get_json() or {}
-        if not data.get('name') or not data.get('template_data'):
-            return error_response('name and template_data are required', 400)
+        if not data.get("name") or not data.get("template_data"):
+            return error_response("name and template_data are required", 400)
 
         template = WorkoutTemplate(
-            name=data['name'],
-            description=data.get('description'),
-            goal=data.get('goal'),
-            difficulty=data.get('difficulty'),
-            plan_type=data.get('plan_type'),
-            duration_weeks=data.get('duration_weeks'),
-            template_data=json.dumps(data['template_data']),
+            name=data["name"],
+            description=data.get("description"),
+            goal=data.get("goal"),
+            difficulty=data.get("difficulty"),
+            plan_type=data.get("plan_type"),
+            duration_weeks=data.get("duration_weeks"),
+            template_data=json.dumps(data["template_data"]),
             created_by=user_id,
-            is_public=data.get('is_public', False),
-            approved=False
+            is_public=data.get("is_public", False),
+            approved=False,
         )
         db.session.add(template)
         db.session.commit()
-        return success_response(template.to_dict(), 'Workout template created successfully', 201)
+        return success_response(
+            template.to_dict(), "Workout template created successfully", 201
+        )
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to manage workout templates', 500, str(e))
+        return error_response("Failed to manage workout templates", 500, str(e))
 
 
-@workouts_bp.route('/templates/<int:template_id>/customize', methods=['POST'])
+@workouts_bp.route("/templates/<int:template_id>/customize", methods=["POST"])
 @jwt_required()
 def customize_workout_template(template_id):
     """
@@ -372,68 +406,81 @@ def customize_workout_template(template_id):
         data = request.get_json() or {}
         template = WorkoutTemplate.query.get(template_id)
         if not template:
-            return error_response('Workout template not found', 404)
+            return error_response("Workout template not found", 404)
 
         if not template.approved and template.created_by != user_id:
-            return error_response('Template is not available', 403)
+            return error_response("Template is not available", 403)
 
-        template_data = template.to_dict()['template_data']
-        days = data.get('days', template_data.get('days', []))
+        template_data = template.to_dict()["template_data"]
+        days = data.get("days", template_data.get("days", []))
 
         plan = WorkoutPlan(
-            name=data.get('name', f'{template.name} (Customized)'),
-            description=data.get('description', template.description),
+            name=data.get("name", f"{template.name} (Customized)"),
+            description=data.get("description", template.description),
             coach_id=user_id,
             client_id=user_id,
-            start_date=datetime.fromisoformat(data['start_date']).date() if data.get('start_date') else None,
-            end_date=datetime.fromisoformat(data['end_date']).date() if data.get('end_date') else None
+            start_date=datetime.fromisoformat(data["start_date"]).date()
+            if data.get("start_date")
+            else None,
+            end_date=datetime.fromisoformat(data["end_date"]).date()
+            if data.get("end_date")
+            else None,
         )
         db.session.add(plan)
         db.session.flush()
 
-        db.session.add(WorkoutPlanMetadata(
-            plan_id=plan.id,
-            goal=data.get('goal', template.goal),
-            difficulty=data.get('difficulty', template.difficulty),
-            plan_type=data.get('plan_type', template.plan_type),
-            duration_weeks=data.get('duration_weeks', template.duration_weeks)
-        ))
+        db.session.add(
+            WorkoutPlanMetadata(
+                plan_id=plan.id,
+                goal=data.get("goal", template.goal),
+                difficulty=data.get("difficulty", template.difficulty),
+                plan_type=data.get("plan_type", template.plan_type),
+                duration_weeks=data.get("duration_weeks", template.duration_weeks),
+            )
+        )
 
         for day_data in days:
             day = WorkoutDay(
                 plan_id=plan.id,
-                name=day_data.get('name'),
-                day_number=day_data.get('day_number'),
-                notes=day_data.get('notes')
+                name=day_data.get("name"),
+                day_number=day_data.get("day_number"),
+                notes=day_data.get("notes"),
             )
             db.session.add(day)
             db.session.flush()
 
-            for exercise_data in day_data.get('exercises', []):
-                db.session.add(PlanExercise(
-                    workout_day_id=day.id,
-                    exercise_id=exercise_data['exercise_id'],
-                    order=exercise_data.get('order'),
-                    sets=exercise_data.get('sets'),
-                    reps=exercise_data.get('reps'),
-                    duration_minutes=exercise_data.get('duration_minutes'),
-                    rest_seconds=exercise_data.get('rest_seconds'),
-                    weight=exercise_data.get('weight'),
-                    notes=exercise_data.get('notes')
-                ))
+            for exercise_data in day_data.get("exercises", []):
+                db.session.add(
+                    PlanExercise(
+                        workout_day_id=day.id,
+                        exercise_id=exercise_data["exercise_id"],
+                        order=exercise_data.get("order"),
+                        sets=exercise_data.get("sets"),
+                        reps=exercise_data.get("reps"),
+                        duration_minutes=exercise_data.get("duration_minutes"),
+                        rest_seconds=exercise_data.get("rest_seconds"),
+                        weight=exercise_data.get("weight"),
+                        notes=exercise_data.get("notes"),
+                    )
+                )
 
         db.session.commit()
-        return success_response(plan.to_dict(include_days=True), 'Workout template customized successfully', 201)
+        return success_response(
+            plan.to_dict(include_days=True),
+            "Workout template customized successfully",
+            201,
+        )
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to customize workout template', 500, str(e))
+        return error_response("Failed to customize workout template", 500, str(e))
 
 
 # ============================================
 # Workout Plan Management
 # ============================================
 
-@workouts_bp.route('/plans', methods=['GET'])
+
+@workouts_bp.route("/plans", methods=["GET"])
 @jwt_required()
 def get_workout_plans():
     """
@@ -443,9 +490,9 @@ def get_workout_plans():
     """
     try:
         user_id = int(get_jwt_identity())
-        role = request.args.get('role', 'client')
+        role = request.args.get("role", "client")
 
-        if role == 'coach':
+        if role == "coach":
             plans = WorkoutPlan.query.filter_by(coach_id=user_id).all()
         else:
             plans = WorkoutPlan.query.filter_by(client_id=user_id).all()
@@ -457,22 +504,26 @@ def get_workout_plans():
             ).all()
             metadata_by_plan_id = {row.plan_id: row for row in metadata_rows}
 
-        goal = request.args.get('goal')
-        difficulty = request.args.get('difficulty')
-        plan_type = request.args.get('plan_type')
-        duration_weeks = request.args.get('duration_weeks', type=int)
+        goal = request.args.get("goal")
+        difficulty = request.args.get("difficulty")
+        plan_type = request.args.get("plan_type")
+        duration_weeks = request.args.get("duration_weeks", type=int)
 
         if any([goal, difficulty, plan_type, duration_weeks]):
             filtered_plans = []
             for plan in plans:
                 metadata = metadata_by_plan_id.get(plan.id)
-                if goal and (not metadata or goal.lower() not in (metadata.goal or '').lower()):
+                if goal and (
+                    not metadata or goal.lower() not in (metadata.goal or "").lower()
+                ):
                     continue
                 if difficulty and (not metadata or metadata.difficulty != difficulty):
                     continue
                 if plan_type and (not metadata or metadata.plan_type != plan_type):
                     continue
-                if duration_weeks and (not metadata or metadata.duration_weeks != duration_weeks):
+                if duration_weeks and (
+                    not metadata or metadata.duration_weeks != duration_weeks
+                ):
                     continue
                 filtered_plans.append(plan)
             plans = filtered_plans
@@ -490,16 +541,50 @@ def get_workout_plans():
                 print(f"Error serializing plan {plan.id}: {str(plan_error)}")
                 continue
 
-        return success_response({
-            'plans': plans_data
-        }, 'Workout plans retrieved successfully', 200)
+        return success_response(
+            {"plans": plans_data}, "Workout plans retrieved successfully", 200
+        )
 
     except Exception as e:
         print(f"Error retrieving workout plans: {str(e)}")
-        return error_response('Failed to retrieve workout plans', 500, str(e))
+        return error_response("Failed to retrieve workout plans", 500, str(e))
 
 
-@workouts_bp.route('/plans/<int:plan_id>', methods=['GET'])
+@workouts_bp.route("/plans/<int:plan_id>/clients", methods=["GET"])
+@jwt_required()
+def get_plan_clients(plan_id):
+    """
+    Get the client(s) assigned to a workout plan (for coaches)
+    GET /api/workouts/plans/{plan_id}/clients
+    """
+    try:
+        user_id = int(get_jwt_identity())
+
+        plan = WorkoutPlan.query.get(plan_id)
+        if not plan:
+            return error_response("Workout plan not found", 404)
+
+        if plan.coach_id != user_id:
+            return error_response("Unauthorized to access this plan", 403)
+
+        client_data = plan.client.to_dict(include_profile=True)
+        client_data["plan_status"] = plan.status
+        client_data["start_date"] = (
+            plan.start_date.isoformat() if plan.start_date else None
+        )
+        client_data["end_date"] = plan.end_date.isoformat() if plan.end_date else None
+
+        return success_response(
+            {"plan": plan.to_dict(), "clients": [client_data]},
+            "Plan clients retrieved successfully",
+            200,
+        )
+
+    except Exception as e:
+        return error_response("Failed to retrieve plan clients", 500, str(e))
+
+
+@workouts_bp.route("/plans/<int:plan_id>", methods=["GET"])
 @jwt_required()
 def get_workout_plan(plan_id):
     """
@@ -511,19 +596,21 @@ def get_workout_plan(plan_id):
 
         plan = WorkoutPlan.query.get(plan_id)
         if not plan:
-            return error_response('Workout plan not found', 404)
+            return error_response("Workout plan not found", 404)
 
         # Verify user has access
         if plan.coach_id != user_id and plan.client_id != user_id:
-            return error_response('Unauthorized to access this workout plan', 403)
+            return error_response("Unauthorized to access this workout plan", 403)
 
-        return success_response(plan.to_dict(include_days=True), 'Workout plan retrieved successfully', 200)
+        return success_response(
+            plan.to_dict(include_days=True), "Workout plan retrieved successfully", 200
+        )
 
     except Exception as e:
-        return error_response('Failed to retrieve workout plan', 500, str(e))
+        return error_response("Failed to retrieve workout plan", 500, str(e))
 
 
-@workouts_bp.route('/plans', methods=['POST'])
+@workouts_bp.route("/plans", methods=["POST"])
 @jwt_required()
 def create_workout_plan():
     """
@@ -540,19 +627,19 @@ def create_workout_plan():
         user_id = int(get_jwt_identity())
         data = request.get_json()
 
-        if not data or 'name' not in data:
-            return error_response('name is required', 400)
+        if not data or "name" not in data:
+            return error_response("name is required", 400)
 
-        raw_client_id = data.get('client_id')
+        raw_client_id = data.get("client_id")
         # Empty string or missing => self-plan
-        if raw_client_id in (None, '', 0):
+        if raw_client_id in (None, "", 0):
             client_id = user_id
             coach_id = None
         else:
             try:
                 client_id = int(raw_client_id)
             except (ValueError, TypeError):
-                return error_response('Invalid client_id', 400)
+                return error_response("Invalid client_id", 400)
 
             if client_id == user_id:
                 # User explicitly set themselves as client — treat as self-plan
@@ -560,67 +647,74 @@ def create_workout_plan():
             else:
                 # Creating for another user — must be an active coach
                 relationship = CoachRelationship.query.filter_by(
-                    coach_id=user_id,
-                    client_id=client_id,
-                    status='active'
+                    coach_id=user_id, client_id=client_id, status="active"
                 ).first()
                 if not relationship:
-                    return error_response('No active relationship with this client', 403)
+                    return error_response(
+                        "No active relationship with this client", 403
+                    )
                 coach_id = user_id
 
         # Create plan
         plan = WorkoutPlan(
-            name=data['name'],
-            description=data.get('description'),
+            name=data["name"],
+            description=data.get("description"),
             coach_id=coach_id,
             client_id=client_id,
-            start_date=datetime.fromisoformat(data['start_date']).date() if data.get('start_date') else None,
-            end_date=datetime.fromisoformat(data['end_date']).date() if data.get('end_date') else None
+            start_date=datetime.fromisoformat(data["start_date"]).date()
+            if data.get("start_date")
+            else None,
+            end_date=datetime.fromisoformat(data["end_date"]).date()
+            if data.get("end_date")
+            else None,
         )
 
         db.session.add(plan)
         db.session.flush()  # Get plan.id before adding days
 
         # Add workout days if provided
-        if 'days' in data and isinstance(data['days'], list):
-            for day_data in data['days']:
+        if "days" in data and isinstance(data["days"], list):
+            for day_data in data["days"]:
                 day = WorkoutDay(
                     plan_id=plan.id,
-                    name=day_data['name'],
-                    day_number=day_data.get('day_number'),
-                    notes=day_data.get('notes')
+                    name=day_data["name"],
+                    day_number=day_data.get("day_number"),
+                    notes=day_data.get("notes"),
                 )
                 db.session.add(day)
                 db.session.flush()  # Get day.id before adding exercises
 
                 # Add exercises to the day if provided
-                if 'exercises' in day_data and isinstance(day_data['exercises'], list):
-                    for ex_data in day_data['exercises']:
+                if "exercises" in day_data and isinstance(day_data["exercises"], list):
+                    for ex_data in day_data["exercises"]:
                         plan_exercise = PlanExercise(
                             workout_day_id=day.id,
-                            exercise_id=ex_data['exercise_id'],
-                            order=ex_data.get('order'),
-                            sets=ex_data.get('sets'),
-                            reps=ex_data.get('reps'),
-                            duration_minutes=ex_data.get('duration_minutes'),
-                            rest_seconds=ex_data.get('rest_seconds'),
-                            weight=ex_data.get('weight'),
-                            notes=ex_data.get('notes')
+                            exercise_id=ex_data["exercise_id"],
+                            order=ex_data.get("order"),
+                            sets=ex_data.get("sets"),
+                            reps=ex_data.get("reps"),
+                            duration_minutes=ex_data.get("duration_minutes"),
+                            rest_seconds=ex_data.get("rest_seconds"),
+                            weight=ex_data.get("weight"),
+                            notes=ex_data.get("notes"),
                         )
                         db.session.add(plan_exercise)
 
         db.session.commit()
 
-        return success_response(plan.to_dict(include_days=True), 'Workout plan created successfully', 201)
+        return success_response(
+            plan.to_dict(include_days=True), "Workout plan created successfully", 201
+        )
 
     except Exception as e:
         db.session.rollback()
         import traceback
+
         print(f"\n===== ERROR in POST /plans =====")
         print(f"Exception: {str(e)}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         print(f"==============================\n")
-        return error_response('Failed to create workout plan', 500, str(e))
+        return error_response("Failed to create workout plan", 500, str(e))
 
 
 def _user_can_modify_plan(plan, user_id):
@@ -633,7 +727,7 @@ def _user_can_modify_plan(plan, user_id):
     return plan.client_id == user_id
 
 
-@workouts_bp.route('/plans/<int:plan_id>', methods=['PUT'])
+@workouts_bp.route("/plans/<int:plan_id>", methods=["PUT"])
 @jwt_required()
 def update_workout_plan(plan_id):
     """
@@ -648,33 +742,43 @@ def update_workout_plan(plan_id):
 
         plan = WorkoutPlan.query.get(plan_id)
         if not plan:
-            return error_response('Workout plan not found', 404)
+            return error_response("Workout plan not found", 404)
 
         if not _user_can_modify_plan(plan, user_id):
-            return error_response('Only the plan owner can update this plan', 403)
+            return error_response("Only the plan owner can update this plan", 403)
 
         # Update fields
-        if 'name' in data:
-            plan.name = data['name']
-        if 'description' in data:
-            plan.description = data['description']
-        if 'start_date' in data:
-            plan.start_date = datetime.fromisoformat(data['start_date']).date() if data['start_date'] else None
-        if 'end_date' in data:
-            plan.end_date = datetime.fromisoformat(data['end_date']).date() if data['end_date'] else None
-        if 'status' in data:
-            plan.status = data['status']
+        if "name" in data:
+            plan.name = data["name"]
+        if "description" in data:
+            plan.description = data["description"]
+        if "start_date" in data:
+            plan.start_date = (
+                datetime.fromisoformat(data["start_date"]).date()
+                if data["start_date"]
+                else None
+            )
+        if "end_date" in data:
+            plan.end_date = (
+                datetime.fromisoformat(data["end_date"]).date()
+                if data["end_date"]
+                else None
+            )
+        if "status" in data:
+            plan.status = data["status"]
 
         db.session.commit()
 
-        return success_response(plan.to_dict(include_days=True), 'Workout plan updated successfully', 200)
+        return success_response(
+            plan.to_dict(include_days=True), "Workout plan updated successfully", 200
+        )
 
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to update workout plan', 500, str(e))
+        return error_response("Failed to update workout plan", 500, str(e))
 
 
-@workouts_bp.route('/plans/<int:plan_id>', methods=['DELETE'])
+@workouts_bp.route("/plans/<int:plan_id>", methods=["DELETE"])
 @jwt_required()
 def delete_workout_plan(plan_id):
     """
@@ -686,68 +790,73 @@ def delete_workout_plan(plan_id):
 
         plan = WorkoutPlan.query.get(plan_id)
         if not plan:
-            return error_response('Workout plan not found', 404)
+            return error_response("Workout plan not found", 404)
 
         if not _user_can_modify_plan(plan, user_id):
-            return error_response('Only the plan owner can delete this plan', 403)
+            return error_response("Only the plan owner can delete this plan", 403)
 
         db.session.delete(plan)
         db.session.commit()
 
-        return success_response(None, 'Workout plan deleted successfully', 200)
+        return success_response(None, "Workout plan deleted successfully", 200)
 
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to delete workout plan', 500, str(e))
+        return error_response("Failed to delete workout plan", 500, str(e))
 
 
-@workouts_bp.route('/assignments', methods=['POST', 'DELETE'])
+@workouts_bp.route("/assignments", methods=["POST", "DELETE"])
 @jwt_required()
 def workout_assignments():
     """Assign workout plans to specific calendar days"""
     user_id = int(get_jwt_identity())
 
-    if request.method == 'POST':
+    if request.method == "POST":
         try:
             data = request.get_json() or {}
-            if not data.get('plan_id') or not data.get('assigned_date'):
-                return error_response('plan_id and assigned_date are required', 400)
+            if not data.get("plan_id") or not data.get("assigned_date"):
+                return error_response("plan_id and assigned_date are required", 400)
 
-            plan = WorkoutPlan.query.get(data['plan_id'])
+            plan = WorkoutPlan.query.get(data["plan_id"])
             if not plan or plan.client_id != user_id:
-                return error_response('Workout plan not found', 404)
+                return error_response("Workout plan not found", 404)
 
             assignment = WorkoutPlanAssignment(
                 user_id=user_id,
                 plan_id=plan.id,
-                workout_day_id=data.get('workout_day_id'),
-                assigned_date=datetime.fromisoformat(data['assigned_date']).date()
+                workout_day_id=data.get("workout_day_id"),
+                assigned_date=datetime.fromisoformat(data["assigned_date"]).date(),
             )
             db.session.add(assignment)
             db.session.commit()
-            return success_response(assignment.to_dict(), 'Workout assigned to calendar', 201)
+            return success_response(
+                assignment.to_dict(), "Workout assigned to calendar", 201
+            )
         except Exception as e:
             db.session.rollback()
-            return error_response('Failed to assign workout plan', 500, str(e))
+            return error_response("Failed to assign workout plan", 500, str(e))
 
     try:
-        assignment_id = request.args.get('assignment_id', type=int)
-        assignment = WorkoutPlanAssignment.query.filter_by(id=assignment_id, user_id=user_id).first()
+        assignment_id = request.args.get("assignment_id", type=int)
+        assignment = WorkoutPlanAssignment.query.filter_by(
+            id=assignment_id, user_id=user_id
+        ).first()
         if not assignment:
-            return error_response('Assignment not found', 404)
+            return error_response("Assignment not found", 404)
         db.session.delete(assignment)
         db.session.commit()
-        return success_response(None, 'Workout assignment removed', 200)
+        return success_response(None, "Workout assignment removed", 200)
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to remove workout assignment', 500, str(e))
+        return error_response("Failed to remove workout assignment", 500, str(e))
 
 
 # ============================================
 # Workout Logging
 # ============================================
 
-@workouts_bp.route('/logs', methods=['GET'])
+
+@workouts_bp.route("/logs", methods=["GET"])
 @jwt_required()
 def get_workout_logs():
     """
@@ -761,30 +870,37 @@ def get_workout_logs():
         query = WorkoutLog.query.filter_by(client_id=user_id)
 
         # Filter by date range
-        start_date = request.args.get('start_date')
+        start_date = request.args.get("start_date")
         if start_date:
-            query = query.filter(WorkoutLog.date >= datetime.fromisoformat(start_date).date())
+            query = query.filter(
+                WorkoutLog.date >= datetime.fromisoformat(start_date).date()
+            )
 
-        end_date = request.args.get('end_date')
+        end_date = request.args.get("end_date")
         if end_date:
-            query = query.filter(WorkoutLog.date <= datetime.fromisoformat(end_date).date())
+            query = query.filter(
+                WorkoutLog.date <= datetime.fromisoformat(end_date).date()
+            )
 
         logs = query.order_by(WorkoutLog.date.desc()).all()
 
-        return success_response({
-            'logs': [log.to_dict() for log in logs]
-        }, 'Workout logs retrieved successfully', 200)
+        return success_response(
+            {"logs": [log.to_dict() for log in logs]},
+            "Workout logs retrieved successfully",
+            200,
+        )
 
     except Exception as e:
         import traceback
+
         print(f"\n===== ERROR in GET /logs =====")
         print(f"Exception: {str(e)}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         print(f"==============================\n")
-        return error_response('Failed to retrieve workout logs', 500, str(e))
+        return error_response("Failed to retrieve workout logs", 500, str(e))
 
 
-@workouts_bp.route('/logs', methods=['POST'])
+@workouts_bp.route("/logs", methods=["POST"])
 @jwt_required()
 def create_workout_log():
     """
@@ -800,32 +916,32 @@ def create_workout_log():
         user_id = int(get_jwt_identity())
         data = request.get_json()
 
-        if not data or 'date' not in data:
-            return error_response('date is required', 400)
+        if not data or "date" not in data:
+            return error_response("date is required", 400)
 
         # Convert empty strings to None for foreign keys
-        plan_id = data.get('plan_id') or None
-        workout_day_id = data.get('workout_day_id') or None
-        library_exercise_id = data.get('library_exercise_id') or None
+        plan_id = data.get("plan_id") or None
+        workout_day_id = data.get("workout_day_id") or None
+        library_exercise_id = data.get("library_exercise_id") or None
 
         def _to_int(value):
-            if value in (None, ''):
+            if value in (None, ""):
                 return None
             try:
                 return int(value)
             except (ValueError, TypeError):
                 return None
 
-        duration_minutes = _to_int(data.get('duration_minutes'))
-        rating = _to_int(data.get('rating'))
-        calories_burned = _to_int(data.get('calories_burned'))
+        duration_minutes = _to_int(data.get("duration_minutes"))
+        rating = _to_int(data.get("rating"))
+        calories_burned = _to_int(data.get("calories_burned"))
         library_exercise_id = _to_int(library_exercise_id)
 
         # If a library exercise is referenced, prefer its values when the client
         # didn't supply their own.
-        workout_name = data.get('workout_name')
-        exercise_type = data.get('exercise_type')
-        muscle_group = data.get('muscle_group')
+        workout_name = data.get("workout_name")
+        exercise_type = data.get("exercise_type")
+        muscle_group = data.get("muscle_group")
         if library_exercise_id:
             lib_exercise = Exercise.query.get(library_exercise_id)
             if lib_exercise and lib_exercise.is_library_workout:
@@ -850,45 +966,48 @@ def create_workout_log():
             calories_burned=calories_burned,
             exercise_type=exercise_type or None,
             muscle_group=muscle_group or None,
-            date=datetime.fromisoformat(data['date']).date(),
+            date=datetime.fromisoformat(data["date"]).date(),
             duration_minutes=duration_minutes,
-            notes=data.get('notes'),
+            notes=data.get("notes"),
             rating=rating,
-            completed=data.get('completed', True)
+            completed=data.get("completed", True),
         )
 
         db.session.add(log)
         db.session.flush()  # Get log.id
 
         # Add exercise logs if provided
-        if 'exercises' in data and isinstance(data['exercises'], list):
-            for ex_data in data['exercises']:
+        if "exercises" in data and isinstance(data["exercises"], list):
+            for ex_data in data["exercises"]:
                 exercise_log = ExerciseLog(
                     workout_log_id=log.id,
-                    exercise_id=ex_data['exercise_id'],
-                    sets_completed=ex_data.get('sets_completed'),
-                    reps_completed=ex_data.get('reps_completed'),
-                    weight_used=ex_data.get('weight_used'),
-                    duration_minutes=ex_data.get('duration_minutes'),
-                    notes=ex_data.get('notes')
+                    exercise_id=ex_data["exercise_id"],
+                    sets_completed=ex_data.get("sets_completed"),
+                    reps_completed=ex_data.get("reps_completed"),
+                    weight_used=ex_data.get("weight_used"),
+                    duration_minutes=ex_data.get("duration_minutes"),
+                    notes=ex_data.get("notes"),
                 )
                 db.session.add(exercise_log)
 
         db.session.commit()
 
-        return success_response(log.to_dict(include_exercises=True), 'Workout logged successfully', 201)
+        return success_response(
+            log.to_dict(include_exercises=True), "Workout logged successfully", 201
+        )
 
     except Exception as e:
         db.session.rollback()
         import traceback
+
         print(f"\n===== ERROR in POST /logs =====")
         print(f"Exception: {str(e)}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         print(f"==============================\n")
-        return error_response('Failed to log workout', 500, str(e))
+        return error_response("Failed to log workout", 500, str(e))
 
 
-@workouts_bp.route('/logs/<int:log_id>', methods=['PUT'])
+@workouts_bp.route("/logs/<int:log_id>", methods=["PUT"])
 @jwt_required()
 def update_workout_log(log_id):
     """
@@ -901,32 +1020,34 @@ def update_workout_log(log_id):
 
         log = WorkoutLog.query.get(log_id)
         if not log:
-            return error_response('Workout log not found', 404)
+            return error_response("Workout log not found", 404)
 
         # Only owner can update
         if log.client_id != user_id:
-            return error_response('Unauthorized to update this workout log', 403)
+            return error_response("Unauthorized to update this workout log", 403)
 
         # Update fields
-        if 'duration_minutes' in data:
-            log.duration_minutes = data['duration_minutes']
-        if 'notes' in data:
-            log.notes = data['notes']
-        if 'rating' in data:
-            log.rating = data['rating']
-        if 'completed' in data:
-            log.completed = data['completed']
+        if "duration_minutes" in data:
+            log.duration_minutes = data["duration_minutes"]
+        if "notes" in data:
+            log.notes = data["notes"]
+        if "rating" in data:
+            log.rating = data["rating"]
+        if "completed" in data:
+            log.completed = data["completed"]
 
         db.session.commit()
 
-        return success_response(log.to_dict(include_exercises=True), 'Workout log updated successfully', 200)
+        return success_response(
+            log.to_dict(include_exercises=True), "Workout log updated successfully", 200
+        )
 
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to update workout log', 500, str(e))
+        return error_response("Failed to update workout log", 500, str(e))
 
 
-@workouts_bp.route('/logs/<int:log_id>', methods=['DELETE'])
+@workouts_bp.route("/logs/<int:log_id>", methods=["DELETE"])
 @jwt_required()
 def delete_workout_log(log_id):
     """
@@ -938,27 +1059,28 @@ def delete_workout_log(log_id):
 
         log = WorkoutLog.query.get(log_id)
         if not log:
-            return error_response('Workout log not found', 404)
+            return error_response("Workout log not found", 404)
 
         # Only owner can delete
         if log.client_id != user_id:
-            return error_response('Unauthorized to delete this workout log', 403)
+            return error_response("Unauthorized to delete this workout log", 403)
 
         db.session.delete(log)
         db.session.commit()
 
-        return success_response(None, 'Workout log deleted successfully', 200)
+        return success_response(None, "Workout log deleted successfully", 200)
 
     except Exception as e:
         db.session.rollback()
-        return error_response('Failed to delete workout log', 500, str(e))
+        return error_response("Failed to delete workout log", 500, str(e))
 
 
 # ============================================
 # Calendar & Stats
 # ============================================
 
-@workouts_bp.route('/calendar', methods=['GET'])
+
+@workouts_bp.route("/calendar", methods=["GET"])
 @jwt_required()
 def get_workout_calendar():
     """
@@ -968,11 +1090,12 @@ def get_workout_calendar():
     try:
         user_id = int(get_jwt_identity())
 
-        year = request.args.get('year', datetime.now().year, type=int)
-        month = request.args.get('month', datetime.now().month, type=int)
+        year = request.args.get("year", datetime.now().year, type=int)
+        month = request.args.get("month", datetime.now().month, type=int)
 
         # Get first and last day of the month
         from calendar import monthrange
+
         first_day = date(year, month, 1)
         last_day = date(year, month, monthrange(year, month)[1])
 
@@ -980,31 +1103,32 @@ def get_workout_calendar():
         logs = WorkoutLog.query.filter(
             WorkoutLog.client_id == user_id,
             WorkoutLog.date >= first_day,
-            WorkoutLog.date <= last_day
+            WorkoutLog.date <= last_day,
         ).all()
 
         # Get active workout plans
-        plans = WorkoutPlan.query.filter_by(
-            client_id=user_id,
-            status='active'
-        ).all()
+        plans = WorkoutPlan.query.filter_by(client_id=user_id, status="active").all()
         assignments = WorkoutPlanAssignment.query.filter(
             WorkoutPlanAssignment.user_id == user_id,
             WorkoutPlanAssignment.assigned_date >= first_day,
-            WorkoutPlanAssignment.assigned_date <= last_day
+            WorkoutPlanAssignment.assigned_date <= last_day,
         ).all()
 
-        return success_response({
-            'logs': [log.to_dict() for log in logs],
-            'plans': [plan.to_dict() for plan in plans],
-            'assignments': [assignment.to_dict() for assignment in assignments]
-        }, 'Calendar data retrieved successfully', 200)
+        return success_response(
+            {
+                "logs": [log.to_dict() for log in logs],
+                "plans": [plan.to_dict() for plan in plans],
+                "assignments": [assignment.to_dict() for assignment in assignments],
+            },
+            "Calendar data retrieved successfully",
+            200,
+        )
 
     except Exception as e:
-        return error_response('Failed to retrieve calendar data', 500, str(e))
+        return error_response("Failed to retrieve calendar data", 500, str(e))
 
 
-@workouts_bp.route('/stats', methods=['GET'])
+@workouts_bp.route("/stats", methods=["GET"])
 @jwt_required()
 def get_workout_stats():
     """
@@ -1013,11 +1137,12 @@ def get_workout_stats():
     """
     try:
         user_id = int(get_jwt_identity())
-        period = request.args.get('period', 30, type=int)
+        period = request.args.get("period", 30, type=int)
 
         # Calculate date range
         end_date = date.today()
         from datetime import timedelta
+
         start_date = end_date - timedelta(days=period)
 
         # Get logs for the period
@@ -1025,32 +1150,43 @@ def get_workout_stats():
             WorkoutLog.client_id == user_id,
             WorkoutLog.date >= start_date,
             WorkoutLog.date <= end_date,
-            WorkoutLog.completed == True
+            WorkoutLog.completed == True,
         ).all()
 
         # Calculate stats
         total_workouts = len(logs)
         total_duration = sum(log.duration_minutes or 0 for log in logs)
-        avg_rating = sum(log.rating or 0 for log in logs) / total_workouts if total_workouts > 0 else 0
+        avg_rating = (
+            sum(log.rating or 0 for log in logs) / total_workouts
+            if total_workouts > 0
+            else 0
+        )
 
-        return success_response({
-            'period_days': period,
-            'total_workouts': total_workouts,
-            'total_duration_minutes': total_duration,
-            'average_duration_minutes': total_duration / total_workouts if total_workouts > 0 else 0,
-            'average_rating': round(avg_rating, 1),
-            'workout_frequency_per_week': round((total_workouts / period) * 7, 1)
-        }, 'Workout statistics retrieved successfully', 200)
+        return success_response(
+            {
+                "period_days": period,
+                "total_workouts": total_workouts,
+                "total_duration_minutes": total_duration,
+                "average_duration_minutes": total_duration / total_workouts
+                if total_workouts > 0
+                else 0,
+                "average_rating": round(avg_rating, 1),
+                "workout_frequency_per_week": round((total_workouts / period) * 7, 1),
+            },
+            "Workout statistics retrieved successfully",
+            200,
+        )
 
     except Exception as e:
-        return error_response('Failed to retrieve workout statistics', 500, str(e))
+        return error_response("Failed to retrieve workout statistics", 500, str(e))
 
 
 # ============================================
 # Calendar Integration (iCal / Subscription feed)
 # ============================================
 
-@workouts_bp.route('/calendar/feed-info', methods=['GET'])
+
+@workouts_bp.route("/calendar/feed-info", methods=["GET"])
 @jwt_required()
 def get_calendar_feed_info():
     """
@@ -1063,16 +1199,21 @@ def get_calendar_feed_info():
         token = _make_feed_token(user_id)
 
         # Build an absolute URL to the .ics feed. host_url already ends with '/'.
-        host = request.host_url.rstrip('/')
+        host = request.host_url.rstrip("/")
         feed_url = f"{host}/api/workouts/calendar.ics?token={token}"
 
         # webcal:// is the subscribe-as-live-calendar protocol supported by
         # Apple Calendar, Outlook (desktop), and most mobile calendar apps.
-        webcal_url = feed_url.replace('https://', 'webcal://').replace('http://', 'webcal://')
+        webcal_url = feed_url.replace("https://", "webcal://").replace(
+            "http://", "webcal://"
+        )
 
         # Google Calendar "Add by URL" entry point
         from urllib.parse import quote
-        google_calendar_url = f"https://calendar.google.com/calendar/r?cid={quote(webcal_url, safe='')}"
+
+        google_calendar_url = (
+            f"https://calendar.google.com/calendar/r?cid={quote(webcal_url, safe='')}"
+        )
 
         # Outlook Web "Add from web" entry point
         outlook_url = (
@@ -1080,30 +1221,35 @@ def get_calendar_feed_info():
             f"url={quote(feed_url, safe='')}&name={quote('FitApp Workouts', safe='')}"
         )
 
-        return success_response({
-            'feed_url': feed_url,
-            'webcal_url': webcal_url,
-            'google_calendar_url': google_calendar_url,
-            'outlook_url': outlook_url,
-            'token': token,
-            'instructions': {
-                'apple': 'Click the Apple Calendar button (uses webcal://) or in Calendar choose File → New Calendar Subscription and paste the feed URL.',
-                'google': 'Click the Google Calendar button, or in Google Calendar choose "Other calendars" → "From URL" and paste the feed URL.',
-                'outlook': 'Click the Outlook button, or in Outlook choose "Add calendar" → "Subscribe from web" and paste the feed URL.',
-                'download': 'Download the .ics file to import a one-time snapshot of your workouts into any calendar app.',
-            }
-        }, 'Calendar feed info retrieved successfully', 200)
+        return success_response(
+            {
+                "feed_url": feed_url,
+                "webcal_url": webcal_url,
+                "google_calendar_url": google_calendar_url,
+                "outlook_url": outlook_url,
+                "token": token,
+                "instructions": {
+                    "apple": "Click the Apple Calendar button (uses webcal://) or in Calendar choose File → New Calendar Subscription and paste the feed URL.",
+                    "google": 'Click the Google Calendar button, or in Google Calendar choose "Other calendars" → "From URL" and paste the feed URL.',
+                    "outlook": 'Click the Outlook button, or in Outlook choose "Add calendar" → "Subscribe from web" and paste the feed URL.',
+                    "download": "Download the .ics file to import a one-time snapshot of your workouts into any calendar app.",
+                },
+            },
+            "Calendar feed info retrieved successfully",
+            200,
+        )
 
     except Exception as e:
         import traceback
+
         print(f"\n===== ERROR in GET /calendar/feed-info =====")
         print(f"Exception: {str(e)}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         print(f"==============================\n")
-        return error_response('Failed to build calendar feed info', 500, str(e))
+        return error_response("Failed to build calendar feed info", 500, str(e))
 
 
-@workouts_bp.route('/calendar.ics', methods=['GET'])
+@workouts_bp.route("/calendar.ics", methods=["GET"])
 def workout_calendar_ics():
     """
     Serve the user's workout schedule as an iCalendar feed.
@@ -1115,14 +1261,18 @@ def workout_calendar_ics():
         user_id = None
 
         # 1) Signed subscription token — used by Apple / Google / Outlook clients
-        token = request.args.get('token')
+        token = request.args.get("token")
         if token:
             user_id = _parse_feed_token(token)
 
         # 2) JWT header — used by the authenticated "Download .ics" button
         if user_id is None:
             try:
-                from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity as _get_jwt_identity
+                from flask_jwt_extended import (
+                    verify_jwt_in_request,
+                    get_jwt_identity as _get_jwt_identity,
+                )
+
                 verify_jwt_in_request(optional=True)
                 ident = _get_jwt_identity()
                 if ident is not None:
@@ -1131,21 +1281,24 @@ def workout_calendar_ics():
                 user_id = None
 
         if user_id is None:
-            return error_response('Invalid or missing calendar token', 401)
+            return error_response("Invalid or missing calendar token", 401)
 
         ics = _build_workout_ics(user_id, request.host_url)
 
-        resp = Response(ics, mimetype='text/calendar; charset=utf-8')
-        resp.headers['Content-Disposition'] = 'attachment; filename="fitapp-workouts.ics"'
-        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        resp.headers['Pragma'] = 'no-cache'
-        resp.headers['Expires'] = '0'
+        resp = Response(ics, mimetype="text/calendar; charset=utf-8")
+        resp.headers["Content-Disposition"] = (
+            'attachment; filename="fitapp-workouts.ics"'
+        )
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
         return resp
 
     except Exception as e:
         import traceback
+
         print(f"\n===== ERROR in GET /calendar.ics =====")
         print(f"Exception: {str(e)}")
         print(f"Full traceback:\n{traceback.format_exc()}")
         print(f"==============================\n")
-        return error_response('Failed to build calendar feed', 500, str(e))
+        return error_response("Failed to build calendar feed", 500, str(e))
