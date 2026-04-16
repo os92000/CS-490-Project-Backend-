@@ -1,12 +1,174 @@
-from flask import Blueprint, request
+from flask import Blueprint, request, Response, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
+from itsdangerous import URLSafeSerializer, BadSignature
 import json
+import hashlib
 from models import db, User, Exercise, WorkoutPlan, WorkoutDay, PlanExercise, WorkoutLog, ExerciseLog, CoachRelationship, WorkoutPlanMetadata, WorkoutTemplate, WorkoutPlanAssignment
 from utils.helpers import success_response, error_response
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from sqlalchemy import or_, and_
 
 workouts_bp = Blueprint('workouts', __name__, url_prefix='/api/workouts')
+
+
+# ============================================
+# Calendar Feed Token Helpers
+# ============================================
+
+def _feed_serializer():
+    """Signed serializer used for subscription feed tokens (stateless)."""
+    secret = current_app.config.get('SECRET_KEY', 'dev-secret')
+    return URLSafeSerializer(secret, salt='workout-calendar-feed')
+
+
+def _make_feed_token(user_id):
+    return _feed_serializer().dumps({'uid': int(user_id)})
+
+
+def _parse_feed_token(token):
+    try:
+        data = _feed_serializer().loads(token)
+        return int(data.get('uid'))
+    except (BadSignature, TypeError, ValueError):
+        return None
+
+
+def _ics_escape(value):
+    """Escape a value for inclusion in an iCal text field (RFC 5545)."""
+    if value is None:
+        return ''
+    return (
+        str(value)
+        .replace('\\', '\\\\')
+        .replace(';', '\\;')
+        .replace(',', '\\,')
+        .replace('\r\n', '\\n')
+        .replace('\n', '\\n')
+    )
+
+
+def _ics_fold(line):
+    """Fold long iCal lines at 75 octets per RFC 5545."""
+    if len(line) <= 75:
+        return line
+    chunks = [line[:75]]
+    rest = line[75:]
+    while rest:
+        chunks.append(' ' + rest[:74])
+        rest = rest[74:]
+    return '\r\n'.join(chunks)
+
+
+def _build_workout_ics(user_id, host_url):
+    """Build an iCalendar (.ics) document covering assignments + logs for a user."""
+    today = date.today()
+    window_start = today - timedelta(days=180)
+    window_end = today + timedelta(days=365)
+
+    assignments = WorkoutPlanAssignment.query.filter(
+        WorkoutPlanAssignment.user_id == user_id,
+        WorkoutPlanAssignment.assigned_date >= window_start,
+        WorkoutPlanAssignment.assigned_date <= window_end,
+    ).all()
+
+    logs = WorkoutLog.query.filter(
+        WorkoutLog.client_id == user_id,
+        WorkoutLog.date >= window_start,
+        WorkoutLog.date <= window_end,
+    ).all()
+
+    now_utc = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+
+    lines = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//FitApp//Workout Calendar//EN',
+        'CALSCALE:GREGORIAN',
+        'METHOD:PUBLISH',
+        'X-WR-CALNAME:FitApp Workouts',
+        'X-WR-CALDESC:Your FitApp workout schedule and completed sessions',
+        'X-WR-TIMEZONE:UTC',
+        'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
+        'X-PUBLISHED-TTL:PT1H',
+    ]
+
+    for a in assignments:
+        dt = a.assigned_date
+        dt_next = dt + timedelta(days=1)
+        plan_name = a.plan.name if a.plan else 'Workout'
+        day_name = a.workout_day.name if a.workout_day else None
+        summary = f"💪 {plan_name}"
+        if day_name:
+            summary = f"💪 {plan_name} — {day_name}"
+
+        desc_parts = []
+        if a.plan and a.plan.description:
+            desc_parts.append(a.plan.description)
+        if day_name:
+            desc_parts.append(f"Day: {day_name}")
+        if a.workout_day and a.workout_day.notes:
+            desc_parts.append(a.workout_day.notes)
+        desc_parts.append(f"View in FitApp: {host_url.rstrip('/')}/my-workouts")
+        description = '\n'.join(desc_parts)
+
+        uid = f"assignment-{a.id}-{hashlib.md5(str(a.id).encode()).hexdigest()[:8]}@fitapp"
+
+        lines.extend([
+            'BEGIN:VEVENT',
+            _ics_fold(f'UID:{uid}'),
+            f'DTSTAMP:{now_utc}',
+            f'DTSTART;VALUE=DATE:{dt.strftime("%Y%m%d")}',
+            f'DTEND;VALUE=DATE:{dt_next.strftime("%Y%m%d")}',
+            _ics_fold(f'SUMMARY:{_ics_escape(summary)}'),
+            _ics_fold(f'DESCRIPTION:{_ics_escape(description)}'),
+            'CATEGORIES:Workout,Fitness',
+            'STATUS:CONFIRMED',
+            'TRANSP:OPAQUE',
+            'BEGIN:VALARM',
+            'ACTION:DISPLAY',
+            _ics_fold(f'DESCRIPTION:{_ics_escape("Workout reminder: " + plan_name)}'),
+            'TRIGGER:-PT30M',
+            'END:VALARM',
+            'END:VEVENT',
+        ])
+
+    for log in logs:
+        dt = log.date
+        dt_next = dt + timedelta(days=1)
+        title = log.workout_name or (log.plan.name if log.plan else 'Workout session')
+        summary = f"✅ {title}"
+
+        desc_parts = []
+        if log.duration_minutes:
+            desc_parts.append(f"Duration: {log.duration_minutes} min")
+        if log.rating:
+            desc_parts.append(f"Rating: {'★' * log.rating}{'☆' * (5 - log.rating)}")
+        if log.calories_burned:
+            desc_parts.append(f"Calories burned: {log.calories_burned}")
+        if log.muscle_group:
+            desc_parts.append(f"Muscle group: {log.muscle_group}")
+        if log.notes:
+            desc_parts.append(log.notes)
+        description = '\n'.join(desc_parts) if desc_parts else 'Completed workout'
+
+        uid = f"log-{log.id}-{hashlib.md5(str(log.id).encode()).hexdigest()[:8]}@fitapp"
+
+        lines.extend([
+            'BEGIN:VEVENT',
+            _ics_fold(f'UID:{uid}'),
+            f'DTSTAMP:{now_utc}',
+            f'DTSTART;VALUE=DATE:{dt.strftime("%Y%m%d")}',
+            f'DTEND;VALUE=DATE:{dt_next.strftime("%Y%m%d")}',
+            _ics_fold(f'SUMMARY:{_ics_escape(summary)}'),
+            _ics_fold(f'DESCRIPTION:{_ics_escape(description)}'),
+            'CATEGORIES:Workout,Completed',
+            'STATUS:CONFIRMED',
+            'TRANSP:TRANSPARENT',
+            'END:VEVENT',
+        ])
+
+    lines.append('END:VCALENDAR')
+    return '\r\n'.join(lines)
 
 # ============================================
 # Exercise Management
@@ -871,3 +1033,108 @@ def get_workout_stats():
 
     except Exception as e:
         return error_response('Failed to retrieve workout statistics', 500, str(e))
+
+
+# ============================================
+# Calendar Integration (iCal / Subscription feed)
+# ============================================
+
+@workouts_bp.route('/calendar/feed-info', methods=['GET'])
+@jwt_required()
+def get_calendar_feed_info():
+    """
+    Return subscription URLs so the user can wire their FitApp workouts into
+    Google Calendar, Apple Calendar, Outlook, or any iCal-compatible client.
+    GET /api/workouts/calendar/feed-info
+    """
+    try:
+        user_id = int(get_jwt_identity())
+        token = _make_feed_token(user_id)
+
+        # Build an absolute URL to the .ics feed. host_url already ends with '/'.
+        host = request.host_url.rstrip('/')
+        feed_url = f"{host}/api/workouts/calendar.ics?token={token}"
+
+        # webcal:// is the subscribe-as-live-calendar protocol supported by
+        # Apple Calendar, Outlook (desktop), and most mobile calendar apps.
+        webcal_url = feed_url.replace('https://', 'webcal://').replace('http://', 'webcal://')
+
+        # Google Calendar "Add by URL" entry point
+        from urllib.parse import quote
+        google_calendar_url = f"https://calendar.google.com/calendar/r?cid={quote(webcal_url, safe='')}"
+
+        # Outlook Web "Add from web" entry point
+        outlook_url = (
+            "https://outlook.live.com/calendar/0/addfromweb?"
+            f"url={quote(feed_url, safe='')}&name={quote('FitApp Workouts', safe='')}"
+        )
+
+        return success_response({
+            'feed_url': feed_url,
+            'webcal_url': webcal_url,
+            'google_calendar_url': google_calendar_url,
+            'outlook_url': outlook_url,
+            'token': token,
+            'instructions': {
+                'apple': 'Click the Apple Calendar button (uses webcal://) or in Calendar choose File → New Calendar Subscription and paste the feed URL.',
+                'google': 'Click the Google Calendar button, or in Google Calendar choose "Other calendars" → "From URL" and paste the feed URL.',
+                'outlook': 'Click the Outlook button, or in Outlook choose "Add calendar" → "Subscribe from web" and paste the feed URL.',
+                'download': 'Download the .ics file to import a one-time snapshot of your workouts into any calendar app.',
+            }
+        }, 'Calendar feed info retrieved successfully', 200)
+
+    except Exception as e:
+        import traceback
+        print(f"\n===== ERROR in GET /calendar/feed-info =====")
+        print(f"Exception: {str(e)}")
+        print(f"Full traceback:\n{traceback.format_exc()}")
+        print(f"==============================\n")
+        return error_response('Failed to build calendar feed info', 500, str(e))
+
+
+@workouts_bp.route('/calendar.ics', methods=['GET'])
+def workout_calendar_ics():
+    """
+    Serve the user's workout schedule as an iCalendar feed.
+    GET /api/workouts/calendar.ics?token=<signed>
+    Also accepts an Authorization: Bearer <jwt> header as a fallback so the
+    frontend can stream a download without exposing the subscription token.
+    """
+    try:
+        user_id = None
+
+        # 1) Signed subscription token — used by Apple / Google / Outlook clients
+        token = request.args.get('token')
+        if token:
+            user_id = _parse_feed_token(token)
+
+        # 2) JWT header — used by the authenticated "Download .ics" button
+        if user_id is None:
+            try:
+                from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity as _get_jwt_identity
+                verify_jwt_in_request(optional=True)
+                ident = _get_jwt_identity()
+                if ident is not None:
+                    user_id = int(ident)
+            except Exception:
+                user_id = None
+
+        if user_id is None:
+            return error_response('Invalid or missing calendar token', 401)
+
+        ics = _build_workout_ics(user_id, request.host_url)
+
+        resp = Response(ics, mimetype='text/calendar; charset=utf-8')
+        resp.headers['Content-Disposition'] = 'attachment; filename="fitapp-workouts.ics"'
+        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        return resp
+
+    except Exception as e:
+        import traceback
+        print(f"\n===== ERROR in GET /calendar.ics =====")
+        print(f"Exception: {str(e)}")
+        print(f"Full traceback:\n{traceback.format_exc()}")
+        print(f"==============================\n")
+        return error_response('Failed to build calendar feed', 500, str(e))
