@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import time, datetime
 from decimal import Decimal, InvalidOperation
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -870,8 +870,25 @@ def manage_coach_settings():
 
         db.session.commit()
 
+        # Return full data like GET so frontend can reload cleanly
+        specializations = CoachSpecialization.query.filter_by(coach_id=coach_id).all()
+        availability = (
+            CoachAvailability.query.filter_by(coach_id=coach_id)
+            .order_by(
+                CoachAvailability.day_of_week.asc(),
+                CoachAvailability.start_time.asc(),
+            )
+            .all()
+        )
+        pricing = CoachPricing.query.filter_by(coach_id=coach_id).all()
+
         return success_response(
-            {"coach_info": coach_survey.to_dict()},
+            {
+                "coach_info": coach_survey.to_dict(),
+                "specializations": [item.to_dict() for item in specializations],
+                "availability": [slot.to_dict() for slot in availability],
+                "pricing": [item.to_dict() for item in pricing],
+            },
             "Coach settings updated successfully",
             200,
         )
