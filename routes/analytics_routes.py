@@ -222,6 +222,7 @@ def nutrition_summary():
             'average_daily_calories': avg_calories,
             'average_protein_g': avg_protein,
             'average_carbs_g': avg_carbs,
+            'meal_logs_count': len(meal_logs),
             'period': period,
             'start_date': start_date.isoformat(),
             'end_date': end_date.isoformat(),
