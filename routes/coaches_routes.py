@@ -232,7 +232,7 @@ def get_coaches():
         query = query.outerjoin(
             CoachApplication, CoachApplication.user_id == User.id
         ).filter(
-            or_(CoachApplication.id.is_(None), CoachApplication.status == "approved")
+            or_(CoachApplication.id.is_(None), CoachApplication.status != "denied")
         )
 
         # Join with profile for search
@@ -455,26 +455,19 @@ def send_hire_request(coach_id):
                 "You already have a pending request to this coach", 400
             )
 
-        # Create new request (auto-accepted)
+        # Create pending request for coach to review
         new_request = ClientRequest(
             client_id=client_id,
             coach_id=coach_id,
-            status="accepted",
-            responded_at=db.func.current_timestamp(),
-        )
-
-        # Automatically create active relationship
-        relationship = CoachRelationship(
-            client_id=client_id, coach_id=coach_id, status="active"
+            status="pending",
         )
 
         db.session.add(new_request)
-        db.session.add(relationship)
         db.session.commit()
 
         return success_response(
-            {"request": new_request.to_dict(), "relationship": relationship.to_dict()},
-            "Coach hired successfully",
+            {"request": new_request.to_dict()},
+            "Hire request sent successfully",
             201,
         )
 
@@ -731,6 +724,33 @@ def get_my_coach():
         return error_response("Failed to retrieve coach", 500, str(e))
 
 
+@coaches_bp.route("/my-coach", methods=["DELETE"])
+@jwt_required()
+def remove_my_coach():
+    """
+    End the client's active coach relationship
+    DELETE /api/coaches/my-coach
+    """
+    try:
+        client_id = int(get_jwt_identity())
+
+        relationship = CoachRelationship.query.filter_by(
+            client_id=client_id, status="active"
+        ).first()
+
+        if not relationship:
+            return error_response("No active coach found", 404)
+
+        relationship.status = "ended"
+        db.session.commit()
+
+        return success_response(None, "Coach relationship ended successfully", 200)
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response("Failed to remove coach", 500, str(e))
+
+
 @coaches_bp.route("/application", methods=["GET", "POST"])
 @jwt_required()
 def coach_application():
@@ -926,6 +946,33 @@ def report_coach(coach_id):
     except Exception as e:
         db.session.rollback()
         return error_response("Failed to report coach", 500, str(e))
+
+
+@coaches_bp.route("/clients/<int:client_id>", methods=["DELETE"])
+@jwt_required()
+def remove_client(client_id):
+    """
+    Coach ends an active relationship with a client
+    DELETE /api/coaches/clients/{client_id}
+    """
+    try:
+        coach_id = int(get_jwt_identity())
+
+        relationship = CoachRelationship.query.filter_by(
+            coach_id=coach_id, client_id=client_id, status="active"
+        ).first()
+
+        if not relationship:
+            return error_response("No active relationship with this client", 404)
+
+        relationship.status = "ended"
+        db.session.commit()
+
+        return success_response(None, "Client removed successfully", 200)
+
+    except Exception as e:
+        db.session.rollback()
+        return error_response("Failed to remove client", 500, str(e))
 
 
 @coaches_bp.route("/clients/<int:client_id>/progress", methods=["GET"])
