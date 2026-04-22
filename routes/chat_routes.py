@@ -7,6 +7,9 @@ from datetime import datetime
 
 chat_bp = Blueprint('chat', __name__, url_prefix='/api/chat')
 
+# Holds the SocketIO instance once init_socketio_events is called
+_socketio = None
+
 # Store active socket connections
 active_users = {}
 
@@ -159,7 +162,17 @@ def send_message():
         db.session.add(message)
         db.session.commit()
 
-        return success_response(message.to_dict(include_sender=True), 'Message sent successfully', 201)
+        message_data = message.to_dict(include_sender=True)
+
+        if _socketio:
+            recipient_id = (
+                relationship.coach_id if relationship.client_id == user_id
+                else relationship.client_id
+            )
+            _socketio.emit('new_message', message_data, to=f'conversation_{relationship_id}')
+            _socketio.emit('new_message', message_data, to=f'user_{recipient_id}')
+
+        return success_response(message_data, 'Message sent successfully', 201)
 
     except Exception as e:
         db.session.rollback()
@@ -207,12 +220,22 @@ def create_chat_report():
 # WebSocket event handlers
 def init_socketio_events(socketio):
     """Initialize Socket.IO event handlers"""
+    global _socketio
+    _socketio = socketio
 
     @socketio.on('connect')
     def handle_connect(auth):
         """Handle client connection"""
         print('Client connected:', request.sid)
         emit('connection_status', {'status': 'connected'})
+
+    @socketio.on('register_user')
+    def handle_register_user(data):
+        """Join a personal room so the user receives messages for all their conversations"""
+        user_id = data.get('user_id')
+        if user_id:
+            join_room(f'user_{user_id}')
+            print(f'User {user_id} joined personal room')
 
     @socketio.on('disconnect')
     def handle_disconnect():
@@ -317,9 +340,14 @@ def init_socketio_events(socketio):
                 'profile': sender.profile.to_dict() if sender.profile else None
             }
 
-            # Emit to all users in the conversation room
+            # Emit to all users in the conversation room and to the recipient's personal room
             room = f'conversation_{relationship_id}'
             emit('new_message', message_data, room=room, include_self=True)
+            recipient_id = (
+                relationship.coach_id if relationship.client_id == sender_id
+                else relationship.client_id
+            )
+            emit('new_message', message_data, to=f'user_{recipient_id}')
 
             print(f'Message sent in conversation {relationship_id}')
 
