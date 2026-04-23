@@ -135,6 +135,21 @@ def _normalize_pricing_items(items):
     return out, None
 
 
+def _parse_decimal_query_param(raw_value, param_name):
+    if raw_value in (None, ""):
+        return None, None
+
+    try:
+        value = Decimal(str(raw_value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None, f"{param_name} must be a valid number"
+
+    if value < 0:
+        return None, f"{param_name} must be zero or greater"
+
+    return value, None
+
+
 coaches_bp = Blueprint("coaches", __name__, url_prefix="/api/coaches")
 
 
@@ -219,12 +234,48 @@ def get_coaches():
     """
     Browse/Search coaches (UC 2.1)
     GET /api/coaches?search=query&specialization=id&page=1&per_page=20
+    Optional filters: price_min, price_max, day_of_week, start_time, end_time
     """
     try:
         page = request.args.get("page", 1, type=int)
         per_page = request.args.get("per_page", 20, type=int)
         search = request.args.get("search", "", type=str)
         specialization_id = request.args.get("specialization", type=int)
+        price_min, error = _parse_decimal_query_param(
+            request.args.get("price_min"), "price_min"
+        )
+        if error:
+            return error_response(error, 400)
+
+        price_max, error = _parse_decimal_query_param(
+            request.args.get("price_max"), "price_max"
+        )
+        if error:
+            return error_response(error, 400)
+
+        if price_min is not None and price_max is not None and price_min > price_max:
+            return error_response("price_min must be less than or equal to price_max", 400)
+
+        day_of_week = request.args.get("day_of_week")
+        if day_of_week not in (None, ""):
+            try:
+                day_of_week = int(day_of_week)
+            except (TypeError, ValueError):
+                return error_response("day_of_week must be an integer between 0 and 6", 400)
+            if day_of_week < 0 or day_of_week > 6:
+                return error_response("day_of_week must be between 0 and 6", 400)
+        else:
+            day_of_week = None
+
+        availability_start_raw = request.args.get("start_time")
+        availability_end_raw = request.args.get("end_time")
+        availability_start = _parse_time_hhmm(availability_start_raw)
+        availability_end = _parse_time_hhmm(availability_end_raw)
+        if availability_start_raw not in (None, "") or availability_end_raw not in (None, ""):
+            if availability_start is None or availability_end is None:
+                return error_response("start_time and end_time must be valid HH:MM values", 400)
+            if availability_start >= availability_end:
+                return error_response("start_time must be earlier than end_time", 400)
 
         # Base query: users who are coaches or both
         query = User.query.filter(or_(User.role == "coach", User.role == "both"))
@@ -252,6 +303,31 @@ def get_coaches():
                 CoachSpecialization.specialization_id == specialization_id
             )
 
+        if price_min is not None or price_max is not None:
+            pricing_match = db.session.query(CoachPricing.id).filter(
+                CoachPricing.coach_id == User.id
+            )
+            if price_min is not None:
+                pricing_match = pricing_match.filter(CoachPricing.price >= price_min)
+            if price_max is not None:
+                pricing_match = pricing_match.filter(CoachPricing.price <= price_max)
+            query = query.filter(pricing_match.exists())
+
+        if day_of_week is not None or availability_start is not None or availability_end is not None:
+            availability_match = db.session.query(CoachAvailability.id).filter(
+                CoachAvailability.coach_id == User.id
+            )
+            if day_of_week is not None:
+                availability_match = availability_match.filter(
+                    CoachAvailability.day_of_week == day_of_week
+                )
+            if availability_start is not None and availability_end is not None:
+                availability_match = availability_match.filter(
+                    CoachAvailability.start_time < availability_end,
+                    CoachAvailability.end_time > availability_start,
+                )
+            query = query.filter(availability_match.exists())
+
         # Paginate
         paginated = query.paginate(
             page=page, per_page=min(per_page, 100), error_out=False
@@ -276,6 +352,13 @@ def get_coaches():
                 ).all()
                 coach_data["specializations"] = [cs.to_dict() for cs in specializations]
 
+                availability = (
+                    CoachAvailability.query.filter_by(coach_id=user.id)
+                    .order_by(CoachAvailability.day_of_week.asc(), CoachAvailability.start_time.asc())
+                    .all()
+                )
+                coach_data["availability"] = [slot.to_dict() for slot in availability]
+
                 # Calculate average rating
                 avg_rating = (
                     db.session.query(func.avg(Review.rating))
@@ -288,12 +371,13 @@ def get_coaches():
                     "count": review_count,
                 }
 
-                # Add pricing (first available pricing)
-                pricing = CoachPricing.query.filter_by(coach_id=user.id).first()
-                if pricing:
-                    coach_data["pricing"] = pricing.to_dict()
-                else:
-                    coach_data["pricing"] = None
+                # Add pricing rows so the UI can show a representative price range.
+                pricing = (
+                    CoachPricing.query.filter_by(coach_id=user.id)
+                    .order_by(CoachPricing.id.asc())
+                    .all()
+                )
+                coach_data["pricing"] = [item.to_dict() for item in pricing]
 
                 coaches.append(coach_data)
             except Exception as coach_error:
