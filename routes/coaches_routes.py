@@ -150,6 +150,26 @@ def _parse_decimal_query_param(raw_value, param_name):
     return value, None
 
 
+def _coach_application_ready(user_id):
+    coach_survey = CoachSurvey.query.filter_by(user_id=user_id).first()
+    specializations = CoachSpecialization.query.filter_by(coach_id=user_id).all()
+    availability = CoachAvailability.query.filter_by(coach_id=user_id).all()
+    pricing = CoachPricing.query.filter_by(coach_id=user_id).all()
+
+    if not coach_survey:
+        return False, "Complete your coach profile before submitting an application"
+    if coach_survey.experience_years is None or not coach_survey.bio or not coach_survey.certifications or not coach_survey.specialization_notes:
+        return False, "Complete your coach profile before submitting an application"
+    if not specializations:
+        return False, "Select at least one specialization before submitting an application"
+    if not availability:
+        return False, "Add availability before submitting an application"
+    if not pricing:
+        return False, "Add pricing before submitting an application"
+
+    return True, None
+
+
 coaches_bp = Blueprint("coaches", __name__, url_prefix="/api/coaches")
 
 
@@ -855,6 +875,10 @@ def coach_application():
             )
 
         data = request.get_json() or {}
+        ready, ready_error = _coach_application_ready(user_id)
+        if not ready:
+            return error_response(ready_error, 400)
+
         if application:
             application.status = "pending"
             application.notes = data.get("notes", application.notes)
