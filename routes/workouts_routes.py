@@ -289,6 +289,58 @@ def _build_workout_ics(user_id, host_url):
 # ============================================
 
 
+@workouts_bp.route("/public/exercises", methods=["GET"])
+def get_public_exercises():
+    """
+    Public exercise bank for discovery pages (no login required).
+    GET /api/workouts/public/exercises?page=1&per_page=12&category=strength&search=bench
+    """
+    try:
+        page = request.args.get("page", 1, type=int)
+        per_page = request.args.get("per_page", 12, type=int)
+        page = max(1, page)
+        per_page = max(1, min(per_page, 48))
+
+        query = Exercise.query.filter(Exercise.is_public == True)
+
+        category = request.args.get("category")
+        if category:
+            query = query.filter_by(category=category)
+
+        muscle_group = request.args.get("muscle_group")
+        if muscle_group:
+            query = query.filter_by(muscle_group=muscle_group)
+
+        difficulty = request.args.get("difficulty")
+        if difficulty:
+            query = query.filter_by(difficulty=difficulty)
+
+        search = request.args.get("search")
+        if search:
+            query = query.filter(Exercise.name.ilike(f"%{search}%"))
+
+        paginated = query.order_by(Exercise.name.asc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+
+        return success_response(
+            {
+                "exercises": [ex.to_dict() for ex in paginated.items],
+                "total": paginated.total,
+                "pages": paginated.pages,
+                "current_page": paginated.page,
+                "per_page": per_page,
+                "has_next": paginated.has_next,
+                "has_prev": paginated.has_prev,
+            },
+            "Public exercises retrieved successfully",
+            200,
+        )
+
+    except Exception as e:
+        return error_response("Failed to retrieve public exercises", 500, str(e))
+
+
 @workouts_bp.route("/exercises", methods=["GET"])
 @jwt_required()
 def get_exercises():
