@@ -3,8 +3,22 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, MealLog, BodyMetric, WellnessLog, DailyMetric, MealPlan
 from utils.helpers import success_response, error_response, is_current_day
 from datetime import datetime, date
+from sqlalchemy import MetaData, Table, select, and_
 
 nutrition_bp = Blueprint('nutrition', __name__, url_prefix='/api/nutrition')
+
+
+def _to_optional_int(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == '':
+            return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 # Meal Logs
 @nutrition_bp.route('/meals', methods=['GET', 'POST'])
@@ -78,27 +92,71 @@ def delete_meal_log(meal_id):
 def meal_plans():
     user_id = int(get_jwt_identity())
 
+    metadata = MetaData()
+    meal_plans_table = Table('meal_plans', metadata, autoload_with=db.engine)
+    meal_plan_cols = set(meal_plans_table.c.keys())
+    if 'name' in meal_plan_cols:
+        meal_plan_title_col = 'name'
+    elif 'title' in meal_plan_cols:
+        meal_plan_title_col = 'title'
+    else:
+        return error_response('Meal plans schema is missing name/title column', 500)
+
     if request.method == 'GET':
         try:
-            plans = MealPlan.query.filter_by(user_id=user_id).order_by(MealPlan.created_at.desc()).all()
-            return success_response({'meal_plans': [plan.to_dict() for plan in plans]}, 'Meal plans retrieved', 200)
+            order_col = meal_plans_table.c.created_at.desc() if 'created_at' in meal_plan_cols else meal_plans_table.c.id.desc()
+            rows = db.session.execute(
+                select(meal_plans_table)
+                .where(meal_plans_table.c.user_id == user_id)
+                .order_by(order_col)
+            ).mappings().all()
+
+            plans = []
+            for row in rows:
+                created_at = row.get('created_at')
+                plans.append({
+                    'id': row.get('id'),
+                    'user_id': row.get('user_id'),
+                    'title': row.get(meal_plan_title_col),
+                    'notes': row.get('notes'),
+                    'created_at': created_at.isoformat() if created_at else None,
+                })
+
+            return success_response({'meal_plans': plans}, 'Meal plans retrieved', 200)
         except Exception as e:
-            print(f"Failed to retrieve meal plans for user {user_id}: {str(e)}")
-            return success_response({'meal_plans': []}, 'Meal plans retrieved', 200)
+            return error_response('Failed to retrieve meal plans', 500, str(e))
 
     try:
         data = request.get_json() or {}
         if not data.get('title'):
             return error_response('title is required', 400)
 
-        plan = MealPlan(
-            user_id=user_id,
-            title=data['title'],
-            notes=data.get('notes')
-        )
-        db.session.add(plan)
+        payload = {
+            'user_id': user_id,
+            meal_plan_title_col: data['title'],
+        }
+        if 'notes' in meal_plan_cols:
+            payload['notes'] = data.get('notes')
+        if 'created_at' in meal_plan_cols:
+            payload['created_at'] = datetime.utcnow()
+
+        result = db.session.execute(meal_plans_table.insert().values(**payload))
         db.session.commit()
-        return success_response(plan.to_dict(), 'Meal plan saved', 201)
+
+        created_id = result.lastrowid
+        saved_row = db.session.execute(
+            select(meal_plans_table).where(meal_plans_table.c.id == created_id)
+        ).mappings().first()
+
+        created_at = saved_row.get('created_at') if saved_row else None
+        saved_plan = {
+            'id': saved_row.get('id') if saved_row else created_id,
+            'user_id': user_id,
+            'title': (saved_row.get(meal_plan_title_col) if saved_row else data['title']),
+            'notes': saved_row.get('notes') if saved_row else data.get('notes'),
+            'created_at': created_at.isoformat() if created_at else None,
+        }
+        return success_response(saved_plan, 'Meal plan saved', 201)
     except Exception as e:
         db.session.rollback()
         return error_response('Failed to save meal plan', 500, str(e))
@@ -168,30 +226,108 @@ def delete_body_metric(metric_id):
 def daily_metrics():
     user_id = int(get_jwt_identity())
 
+    metadata = MetaData()
+    daily_metrics_table = Table('daily_metrics', metadata, autoload_with=db.engine)
+    daily_metric_cols = set(daily_metrics_table.c.keys())
+    if 'log_date' in daily_metric_cols:
+        daily_metric_date_col = 'log_date'
+    elif 'date' in daily_metric_cols:
+        daily_metric_date_col = 'date'
+    else:
+        return error_response('Daily metrics schema is missing date/log_date column', 500)
+
     if request.method == 'GET':
         try:
-            metrics = DailyMetric.query.filter_by(user_id=user_id).order_by(DailyMetric.date.desc()).all()
-            return success_response({'daily_metrics': [metric.to_dict() for metric in metrics]}, 'Daily metrics retrieved', 200)
+            rows = db.session.execute(
+                select(daily_metrics_table)
+                .where(daily_metrics_table.c.user_id == user_id)
+                .order_by(daily_metrics_table.c[daily_metric_date_col].desc(), daily_metrics_table.c.id.desc())
+            ).mappings().all()
+
+            metrics = []
+            for row in rows:
+                created_at = row.get('created_at')
+                log_date = row.get(daily_metric_date_col)
+                metrics.append({
+                    'id': row.get('id'),
+                    'user_id': row.get('user_id'),
+                    'date': log_date.isoformat() if log_date else None,
+                    'steps': row.get('steps'),
+                    'calories_burned': row.get('calories_burned'),
+                    'water_intake_ml': row.get('water_intake_ml'),
+                    'notes': row.get('notes'),
+                    'created_at': created_at.isoformat() if created_at else None,
+                })
+
+            return success_response({'daily_metrics': metrics}, 'Daily metrics retrieved', 200)
         except Exception as e:
-            print(f"Failed to retrieve daily metrics for user {user_id}: {str(e)}")
-            return success_response({'daily_metrics': []}, 'Daily metrics retrieved', 200)
+            return error_response('Failed to retrieve daily metrics', 500, str(e))
 
     try:
         data = request.get_json() or {}
         if not data.get('date'):
             return error_response('date is required', 400)
 
-        metric = DailyMetric(
-            user_id=user_id,
-            date=datetime.fromisoformat(data['date']).date(),
-            steps=data.get('steps'),
-            calories_burned=data.get('calories_burned'),
-            water_intake_ml=data.get('water_intake_ml'),
-            notes=data.get('notes')
-        )
-        db.session.add(metric)
+        metric_date = datetime.fromisoformat(data['date']).date()
+        payload = {
+            'steps': _to_optional_int(data.get('steps')),
+            'calories_burned': _to_optional_int(data.get('calories_burned')),
+            'water_intake_ml': _to_optional_int(data.get('water_intake_ml')),
+        }
+        if 'notes' in daily_metric_cols:
+            payload['notes'] = data.get('notes')
+
+        existing = db.session.execute(
+            select(daily_metrics_table.c.id).where(
+                and_(
+                    daily_metrics_table.c.user_id == user_id,
+                    daily_metrics_table.c[daily_metric_date_col] == metric_date,
+                )
+            )
+        ).first()
+
+        if existing:
+            metric_id = existing[0]
+            db.session.execute(
+                daily_metrics_table.update()
+                .where(daily_metrics_table.c.id == metric_id)
+                .values(**payload)
+            )
+            status_code = 200
+            message = 'Daily metric updated'
+        else:
+            insert_payload = {
+                'user_id': user_id,
+                daily_metric_date_col: metric_date,
+                **payload,
+            }
+            if 'created_at' in daily_metric_cols:
+                insert_payload['created_at'] = datetime.utcnow()
+
+            result = db.session.execute(daily_metrics_table.insert().values(**insert_payload))
+            metric_id = result.lastrowid
+            status_code = 201
+            message = 'Daily metric saved'
+
         db.session.commit()
-        return success_response(metric.to_dict(), 'Daily metric saved', 201)
+
+        row = db.session.execute(
+            select(daily_metrics_table).where(daily_metrics_table.c.id == metric_id)
+        ).mappings().first()
+        created_at = row.get('created_at') if row else None
+        log_date = row.get(daily_metric_date_col) if row else metric_date
+        metric_out = {
+            'id': row.get('id') if row else metric_id,
+            'user_id': user_id,
+            'date': log_date.isoformat() if log_date else None,
+            'steps': row.get('steps') if row else payload.get('steps'),
+            'calories_burned': row.get('calories_burned') if row else payload.get('calories_burned'),
+            'water_intake_ml': row.get('water_intake_ml') if row else payload.get('water_intake_ml'),
+            'notes': row.get('notes') if row else payload.get('notes'),
+            'created_at': created_at.isoformat() if created_at else None,
+        }
+
+        return success_response(metric_out, message, status_code)
     except Exception as e:
         db.session.rollback()
         return error_response('Failed to save daily metric', 500, str(e))
