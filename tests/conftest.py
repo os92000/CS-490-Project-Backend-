@@ -10,7 +10,7 @@ def app():
     app.config.update({
         "TESTING": True,
         "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
-        "JWT_SECRET_KEY": "test-secret"
+        "JWT_SECRET_KEY": "s8F!xP9@kL2#zQ7$mT4^vW1&bR6*YhN3"
     })
 
     with app.app_context():
