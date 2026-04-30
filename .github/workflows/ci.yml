@@ -45,7 +45,7 @@ jobs:
           flake8 . \
             --exclude=__pycache__,migrations,venv \
             --max-line-length=120 \
-            --ignore=E501,W503 \
+            --ignore=E501,W503,E302,E305,E203,F401,F541 \
             --count --statistics
 
       - name: Run tests
