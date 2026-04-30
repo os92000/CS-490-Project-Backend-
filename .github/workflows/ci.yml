@@ -1,0 +1,62 @@
+name: FitApp Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  backend-tests:
+    name: Backend Tests (Python/Flask)
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: fitapp_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov flake8
+
+      - name: Lint with flake8
+        run: |
+          flake8 . \
+            --exclude=__pycache__,migrations,venv \
+            --max-line-length=120 \
+            --ignore=E501,W503 \
+            --count --statistics
+
+      - name: Run tests
+        env:
+          FLASK_ENV: testing
+          DATABASE_URL: mysql+pymysql://root:testpass@127.0.0.1/fitapp_test
+          JWT_SECRET_KEY: ci-test-secret-key
+          SECRET_KEY: ci-test-app-secret
+        run: |
+          pytest tests/ \
+            --cov=. \
+            --cov-report=term-missing \
+            -v \
+            --tb=short
