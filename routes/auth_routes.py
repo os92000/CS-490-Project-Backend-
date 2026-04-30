@@ -10,8 +10,38 @@ auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 def signup():
     """
     User registration endpoint (UC 1.1)
-    POST /api/auth/signup
-    Body: {email, password}
+    ---
+    tags:
+      - Auth
+    consumes:
+      - application/json
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - email
+            - password
+          properties:
+            email:
+              type: string
+              format: email
+              example: user@example.com
+            password:
+              type: string
+              format: password
+              example: StrongPass123!
+    responses:
+      201:
+        description: User registered successfully.
+      400:
+        description: Missing or invalid registration fields.
+      409:
+        description: Email already registered.
+      500:
+        description: Registration failed.
     """
     try:
         data = request.get_json()
@@ -67,8 +97,40 @@ def signup():
 def login():
     """
     User login endpoint (UC 1.2)
-    POST /api/auth/login
-    Body: {email, password}
+    ---
+    tags:
+      - Auth
+    consumes:
+      - application/json
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - email
+            - password
+          properties:
+            email:
+              type: string
+              format: email
+              example: user@example.com
+            password:
+              type: string
+              format: password
+              example: StrongPass123!
+    responses:
+      200:
+        description: Login successful.
+      400:
+        description: Email and password are required.
+      401:
+        description: Invalid email or password.
+      403:
+        description: Account is disabled.
+      500:
+        description: Login failed.
     """
     try:
         data = request.get_json()
@@ -110,9 +172,18 @@ def login():
 def logout():
     """
     User logout endpoint (UC 1.3)
-    POST /api/auth/logout
-    Note: In JWT, actual logout is handled client-side by removing the token
-    This endpoint exists for compatibility and future token blacklisting
+    ---
+    tags:
+      - Auth
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: Logout successful.
+      401:
+        description: Authorization token is missing or invalid.
+      500:
+        description: Logout failed.
     """
     try:
         # In a production app, you would add the token to a blacklist here
@@ -126,8 +197,18 @@ def logout():
 def refresh():
     """
     Refresh access token
-    POST /api/auth/refresh
-    Requires refresh token in Authorization header
+    ---
+    tags:
+      - Auth
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: Token refreshed successfully.
+      401:
+        description: Refresh token is missing, expired, or invalid.
+      500:
+        description: Token refresh failed.
     """
     try:
         current_user_id = get_jwt_identity()
@@ -146,7 +227,20 @@ def refresh():
 def get_current_user():
     """
     Get current authenticated user
-    GET /api/auth/me
+    ---
+    tags:
+      - Auth
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: User retrieved successfully.
+      401:
+        description: Authorization token is missing or invalid.
+      404:
+        description: User not found.
+      500:
+        description: Failed to retrieve user.
     """
     try:
         user_id = int(get_jwt_identity())
@@ -166,8 +260,41 @@ def get_current_user():
 def change_password():
     """
     Change user password
-    PUT /api/auth/change-password
-    Body: {current_password, new_password}
+    ---
+    tags:
+      - Auth
+    security:
+      - BearerAuth: []
+    consumes:
+      - application/json
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - current_password
+            - new_password
+          properties:
+            current_password:
+              type: string
+              format: password
+            new_password:
+              type: string
+              format: password
+              example: NewStrongPass123!
+    responses:
+      200:
+        description: Password changed successfully.
+      400:
+        description: Missing fields or invalid new password.
+      401:
+        description: Authorization failed or current password is incorrect.
+      404:
+        description: User not found.
+      500:
+        description: Password change failed.
     """
     try:
         user_id = int(get_jwt_identity())

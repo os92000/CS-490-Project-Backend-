@@ -6,6 +6,7 @@ from flask_socketio import SocketIO
 from sqlalchemy import inspect, text
 from config import config
 from models import db
+from swagger_config import init_swagger
 
 # Initialize SocketIO
 socketio = SocketIO(cors_allowed_origins="*")
@@ -27,6 +28,7 @@ def create_app(config_name=None):
          methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
     jwt = JWTManager(app)
     socketio.init_app(app)
+    init_swagger(app)
 
     # Register blueprints
     from routes.auth_routes import auth_bp
