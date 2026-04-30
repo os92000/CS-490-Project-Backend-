@@ -19,6 +19,7 @@ from models import (
     WorkoutPlan,
     BodyMetric,
     WellnessLog,
+    MealLog,
     CoachApplication,
     ModerationReport,
 )
@@ -1119,6 +1120,12 @@ def get_client_progress(client_id):
         workout_plans = WorkoutPlan.query.filter_by(
             client_id=client_id, status="active"
         ).all()
+        meal_logs = (
+            MealLog.query.filter_by(user_id=client_id)
+            .order_by(MealLog.date.desc(), MealLog.id.desc())
+            .limit(120)
+            .all()
+        )
 
         plans_data = []
         for plan in workout_plans:
@@ -1139,6 +1146,7 @@ def get_client_progress(client_id):
                 "survey": survey.to_dict() if survey else None,
                 "body_metrics": [metric.to_dict() for metric in body_metrics],
                 "wellness_logs": [log.to_dict() for log in wellness_logs],
+                "meal_logs": [log.to_dict() for log in meal_logs],
                 "workout_logs": [
                     log.to_dict(include_exercises=True) for log in workout_logs
                 ],
