@@ -1,4 +1,4 @@
-name: FitApp Backend CI
+name: FitApp Backend CI/CD
 
 on:
   push:
@@ -44,3 +44,29 @@ jobs:
             --cov-report=term-missing \
             -v \
             --tb=short
+
+  deploy:
+    name: Deploy backend to test server
+    needs: backend-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+    concurrency:
+      group: deploy-backend
+      cancel-in-progress: false
+
+    steps:
+      - name: Pull latest backend code
+        run: |
+          cd ~/fitness-app/CS-490-Project-Backend-
+          git fetch --all
+          git reset --hard origin/main
+
+      - name: Rebuild and restart backend container
+        run: |
+          cd ~/fitness-app
+          docker compose --profile test up -d --build backend_test
+
+      - name: Health check
+        run: |
+          sleep 5
+          curl -kfsS https://localhost/health
