@@ -69,4 +69,4 @@ jobs:
       - name: Health check
         run: |
           sleep 5
-          curl -kfsS https://localhost/health
+          curl -kfsS https://localhost:5000/health
