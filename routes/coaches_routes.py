@@ -17,6 +17,7 @@ from models import (
     FitnessSurvey,
     WorkoutLog,
     WorkoutPlan,
+    WorkoutPlanMetadata,
     BodyMetric,
     WellnessLog,
     MealLog,
@@ -1129,7 +1130,10 @@ def get_client_progress(client_id):
 
         plans_data = []
         for plan in workout_plans:
+            metadata = WorkoutPlanMetadata.query.filter_by(plan_id=plan.id).first()
             pd = plan.to_dict(include_days=True)
+            if metadata:
+                pd.update(metadata.to_dict())
             if plan.client:
                 pd["client"] = {
                     "id": plan.client.id,

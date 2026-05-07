@@ -720,7 +720,7 @@ class WorkoutPlan(db.Model):
     coach = db.relationship("User", foreign_keys=[coach_id], backref="plans_created")
     client = db.relationship("User", foreign_keys=[client_id], backref="workout_plans")
 
-    def to_dict(self, include_days=False):
+    def to_dict(self, include_days=False, include_schedule=False):
         data = {
             "id": self.id,
             "name": self.name,
@@ -732,10 +732,19 @@ class WorkoutPlan(db.Model):
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "goal": None,
+            "difficulty": None,
+            "plan_type": None,
+            "duration_weeks": None,
         }
         if include_days:
             data["days"] = [
                 day.to_dict(include_exercises=True) for day in self.workout_days
+            ]
+        if include_schedule:
+            data["calendar_assignments"] = [
+                assignment.to_dict(include_day=True)
+                for assignment in getattr(self, "assignments", [])
             ]
         return data
 
@@ -760,7 +769,11 @@ class WorkoutPlanMetadata(db.Model):
     plan_type = db.Column(db.String(50))
     duration_weeks = db.Column(db.Integer)
 
-    plan = db.relationship("WorkoutPlan", backref="metadata_record")
+    plan = db.relationship(
+        "WorkoutPlan",
+        backref=db.backref("metadata_record", uselist=False),
+        uselist=False,
+    )
 
     def to_dict(self):
         return {
@@ -837,19 +850,20 @@ class WorkoutPlanAssignment(db.Model):
     plan = db.relationship("WorkoutPlan", backref="assignments")
     workout_day = db.relationship("WorkoutDay", backref="assignments")
 
-    def to_dict(self):
-        return {
+    def to_dict(self, include_plan=False, include_day=False):
+        data = {
             "id": self.id,
             "user_id": self.user_id,
             "plan_id": self.plan_id,
             "workout_day_id": self.workout_day_id,
-            "assigned_date": self.assigned_date.isoformat()
-            if self.assigned_date
-            else None,
-            "plan": self.plan.to_dict() if self.plan else None,
-            "workout_day": self.workout_day.to_dict() if self.workout_day else None,
+            "assigned_date": self.assigned_date.isoformat() if self.assigned_date else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+        if include_plan:
+            data["plan"] = self.plan.to_dict() if self.plan else None
+        if include_day:
+            data["workout_day"] = self.workout_day.to_dict() if self.workout_day else None
+        return data
 
 
 class WorkoutDay(db.Model):

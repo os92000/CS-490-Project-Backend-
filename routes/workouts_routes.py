@@ -574,44 +574,41 @@ def customize_workout_template(template_id):
         db.session.add(plan)
         db.session.flush()
 
-        db.session.add(
-            WorkoutPlanMetadata(
-                plan_id=plan.id,
-                goal=data.get("goal", template.goal),
-                difficulty=data.get("difficulty", template.difficulty),
-                plan_type=data.get("plan_type", template.plan_type),
-                duration_weeks=data.get("duration_weeks", template.duration_weeks),
-            )
+        _upsert_plan_metadata(
+            plan.id,
+            {
+                "goal": data.get("goal", template.goal),
+                "difficulty": data.get("difficulty", template.difficulty),
+                "plan_type": data.get("plan_type", template.plan_type),
+                "duration_weeks": data.get("duration_weeks", template.duration_weeks),
+            },
         )
 
-        for day_data in days:
-            day = WorkoutDay(
-                plan_id=plan.id,
-                name=day_data.get("name"),
-                day_number=day_data.get("day_number"),
-                notes=day_data.get("notes"),
-            )
-            db.session.add(day)
-            db.session.flush()
-
-            for exercise_data in day_data.get("exercises", []):
-                db.session.add(
-                    PlanExercise(
-                        workout_day_id=day.id,
-                        exercise_id=exercise_data["exercise_id"],
-                        order=exercise_data.get("order"),
-                        sets=exercise_data.get("sets"),
-                        reps=exercise_data.get("reps"),
-                        duration_minutes=exercise_data.get("duration_minutes"),
-                        rest_seconds=exercise_data.get("rest_seconds"),
-                        weight=exercise_data.get("weight"),
-                        notes=exercise_data.get("notes"),
-                    )
-                )
+        _build_plan_structure(
+            plan,
+            user_id,
+            days,
+            start_date=plan.start_date,
+            end_date=plan.end_date,
+        )
 
         db.session.commit()
+
+        metadata = WorkoutPlanMetadata.query.filter_by(plan_id=plan.id).first()
+        payload = plan.to_dict(include_days=True, include_schedule=True)
+        if metadata:
+            payload.update(metadata.to_dict())
+        if plan.client:
+            payload["client"] = {
+                "id": plan.client.id,
+                "email": plan.client.email,
+                "profile": plan.client.profile.to_dict()
+                if plan.client.profile
+                else None,
+            }
+
         return success_response(
-            plan.to_dict(include_days=True),
+            payload,
             "Workout template customized successfully",
             201,
         )
@@ -755,8 +752,23 @@ def get_workout_plan(plan_id):
         if plan.coach_id != user_id and plan.client_id != user_id:
             return error_response("Unauthorized to access this workout plan", 403)
 
+        metadata = WorkoutPlanMetadata.query.filter_by(plan_id=plan.id).first()
+        payload = plan.to_dict(include_days=True, include_schedule=True)
+        if metadata:
+            payload.update(metadata.to_dict())
+        if plan.client:
+            payload["client"] = {
+                "id": plan.client.id,
+                "email": plan.client.email,
+                "profile": plan.client.profile.to_dict()
+                if plan.client.profile
+                else None,
+            }
+
         return success_response(
-            plan.to_dict(include_days=True), "Workout plan retrieved successfully", 200
+            payload,
+            "Workout plan retrieved successfully",
+            200,
         )
 
     except Exception as e:
@@ -787,7 +799,10 @@ def create_workout_plan():
         # Empty string or missing => self-plan
         if raw_client_id in (None, "", 0):
             client_id = user_id
-            coach_id = None
+            # Some existing DB schemas require a non-null coach_id.
+            # For self-created plans store the current user as the coach_id
+            # to maintain compatibility while preserving ownership semantics.
+            coach_id = user_id
         else:
             try:
                 client_id = int(raw_client_id)
@@ -796,7 +811,8 @@ def create_workout_plan():
 
             if client_id == user_id:
                 # User explicitly set themselves as client — treat as self-plan
-                coach_id = None
+                # Use current user id as coach_id for DBs that enforce NOT NULL.
+                coach_id = user_id
             else:
                 # Creating for another user — must be an active coach
                 relationship = CoachRelationship.query.filter_by(
@@ -825,6 +841,40 @@ def create_workout_plan():
         db.session.add(plan)
         db.session.flush()  # Get plan.id before adding days
 
+        def _parse_iso_date(value):
+            if not value:
+                return None
+            try:
+                return datetime.fromisoformat(value).date()
+            except (TypeError, ValueError):
+                return None
+
+        def _add_calendar_assignments(day_id, base_date, repeat_weeks):
+            if not base_date:
+                return
+
+            try:
+                repeat_count = int(repeat_weeks) if repeat_weeks else 1
+            except (TypeError, ValueError):
+                repeat_count = 1
+
+            repeat_count = max(1, repeat_count)
+
+            for week_index in range(repeat_count):
+                assigned_date = base_date + timedelta(days=7 * week_index)
+                if plan.start_date and assigned_date < plan.start_date:
+                    continue
+                if plan.end_date and assigned_date > plan.end_date:
+                    break
+                db.session.add(
+                    WorkoutPlanAssignment(
+                        user_id=client_id,
+                        plan_id=plan.id,
+                        workout_day_id=day_id,
+                        assigned_date=assigned_date,
+                    )
+                )
+
         # Add workout days if provided
         if "days" in data and isinstance(data["days"], list):
             for day_data in data["days"]:
@@ -836,6 +886,11 @@ def create_workout_plan():
                 )
                 db.session.add(day)
                 db.session.flush()  # Get day.id before adding exercises
+
+                base_date = _parse_iso_date(day_data.get("scheduled_date"))
+                if not base_date and plan.start_date and day.day_number:
+                    base_date = plan.start_date + timedelta(days=max(0, int(day.day_number) - 1))
+                _add_calendar_assignments(day.id, base_date, day_data.get("repeat_weeks", 1))
 
                 # Add exercises to the day if provided
                 if "exercises" in day_data and isinstance(day_data["exercises"], list):
@@ -853,10 +908,37 @@ def create_workout_plan():
                         )
                         db.session.add(plan_exercise)
 
+        # Save metadata if provided
+        if any(key in data for key in ["goal", "difficulty", "plan_type"]):
+            _upsert_plan_metadata(
+                plan.id,
+                {
+                    "goal": data.get("goal"),
+                    "difficulty": data.get("difficulty"),
+                    "plan_type": data.get("plan_type"),
+                    "duration_weeks": data.get("duration_weeks"),
+                },
+            )
+
         db.session.commit()
 
+        metadata = WorkoutPlanMetadata.query.filter_by(plan_id=plan.id).first()
+        payload = plan.to_dict(include_days=True, include_schedule=True)
+        if metadata:
+            payload.update(metadata.to_dict())
+        if plan.client:
+            payload["client"] = {
+                "id": plan.client.id,
+                "email": plan.client.email,
+                "profile": plan.client.profile.to_dict()
+                if plan.client.profile
+                else None,
+            }
+
         return success_response(
-            plan.to_dict(include_days=True), "Workout plan created successfully", 201
+            payload,
+            "Workout plan created successfully",
+            201,
         )
 
     except Exception as e:
@@ -880,6 +962,125 @@ def _user_can_modify_plan(plan, user_id):
     return plan.client_id == user_id
 
 
+def _parse_plan_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_repeat_weeks(value):
+    try:
+        repeat_count = int(value) if value else 1
+    except (TypeError, ValueError):
+        repeat_count = 1
+    return max(1, repeat_count)
+
+
+def _normalize_optional_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_optional_int(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reset_plan_structure(plan_id):
+    WorkoutPlanAssignment.query.filter_by(plan_id=plan_id).delete(synchronize_session=False)
+    WorkoutPlanMetadata.query.filter_by(plan_id=plan_id).delete(synchronize_session=False)
+    WorkoutDay.query.filter_by(plan_id=plan_id).delete(synchronize_session=False)
+
+
+def _build_plan_structure(plan, client_id, days, start_date=None, end_date=None):
+    for day_index, day_data in enumerate(days or [], start=1):
+        day = WorkoutDay(
+            plan_id=plan.id,
+            name=day_data.get("name") or f"Day {day_index}",
+            day_number=day_data.get("day_number") or day_index,
+            notes=day_data.get("notes"),
+        )
+        db.session.add(day)
+        db.session.flush()
+
+        base_date = _parse_plan_date(day_data.get("scheduled_date"))
+        if not base_date and start_date and day.day_number:
+            try:
+                base_date = start_date + timedelta(days=max(0, int(day.day_number) - 1))
+            except (TypeError, ValueError):
+                base_date = start_date
+
+        repeat_count = _normalize_repeat_weeks(day_data.get("repeat_weeks", 1))
+        if base_date:
+            for week_index in range(repeat_count):
+                assigned_date = base_date + timedelta(days=7 * week_index)
+                if start_date and assigned_date < start_date:
+                    continue
+                if end_date and assigned_date > end_date:
+                    break
+                db.session.add(
+                    WorkoutPlanAssignment(
+                        user_id=client_id,
+                        plan_id=plan.id,
+                        workout_day_id=day.id,
+                        assigned_date=assigned_date,
+                    )
+                )
+
+        for exercise_data in day_data.get("exercises", []):
+            db.session.add(
+                PlanExercise(
+                    workout_day_id=day.id,
+                    exercise_id=exercise_data["exercise_id"],
+                    order=_normalize_optional_int(exercise_data.get("order")),
+                    sets=_normalize_optional_int(exercise_data.get("sets")),
+                    reps=_normalize_optional_text(exercise_data.get("reps")),
+                    duration_minutes=_normalize_optional_int(
+                        exercise_data.get("duration_minutes")
+                    ),
+                    rest_seconds=_normalize_optional_int(exercise_data.get("rest_seconds")),
+                    weight=_normalize_optional_text(exercise_data.get("weight")),
+                    notes=_normalize_optional_text(exercise_data.get("notes")),
+                )
+            )
+
+
+def _upsert_plan_metadata(plan_id, metadata):
+    if not metadata:
+        return
+    normalized_metadata = {
+        "goal": _normalize_optional_text(metadata.get("goal")),
+        "difficulty": _normalize_optional_text(metadata.get("difficulty")),
+        "plan_type": _normalize_optional_text(metadata.get("plan_type")),
+        "duration_weeks": _normalize_optional_int(metadata.get("duration_weeks")),
+    }
+    existing = WorkoutPlanMetadata.query.filter_by(plan_id=plan_id).first()
+    if existing:
+        existing.goal = normalized_metadata["goal"]
+        existing.difficulty = normalized_metadata["difficulty"]
+        existing.plan_type = normalized_metadata["plan_type"]
+        existing.duration_weeks = normalized_metadata["duration_weeks"]
+        return
+    db.session.add(
+        WorkoutPlanMetadata(
+            plan_id=plan_id,
+            goal=normalized_metadata["goal"],
+            difficulty=normalized_metadata["difficulty"],
+            plan_type=normalized_metadata["plan_type"],
+            duration_weeks=normalized_metadata["duration_weeks"],
+        )
+    )
+
+
 @workouts_bp.route("/plans/<int:plan_id>", methods=["PUT"])
 @jwt_required()
 def update_workout_plan(plan_id):
@@ -900,30 +1101,58 @@ def update_workout_plan(plan_id):
         if not _user_can_modify_plan(plan, user_id):
             return error_response("Only the plan owner can update this plan", 403)
 
-        # Update fields
+        # Update basic fields
         if "name" in data:
             plan.name = data["name"]
         if "description" in data:
             plan.description = data["description"]
         if "start_date" in data:
-            plan.start_date = (
-                datetime.fromisoformat(data["start_date"]).date()
-                if data["start_date"]
-                else None
-            )
+            plan.start_date = _parse_plan_date(data["start_date"])
         if "end_date" in data:
-            plan.end_date = (
-                datetime.fromisoformat(data["end_date"]).date()
-                if data["end_date"]
-                else None
-            )
+            plan.end_date = _parse_plan_date(data["end_date"])
         if "status" in data:
             plan.status = data["status"]
 
+        if any(key in data for key in ["goal", "difficulty", "plan_type", "duration_weeks"]):
+            _upsert_plan_metadata(
+                plan.id,
+                {
+                    "goal": data.get("goal"),
+                    "difficulty": data.get("difficulty"),
+                    "plan_type": data.get("plan_type"),
+                    "duration_weeks": data.get("duration_weeks"),
+                },
+            )
+
+        if isinstance(data.get("days"), list):
+            _reset_plan_structure(plan.id)
+            _build_plan_structure(
+                plan,
+                plan.client_id,
+                data.get("days"),
+                start_date=plan.start_date,
+                end_date=plan.end_date,
+            )
+
         db.session.commit()
 
+        metadata = WorkoutPlanMetadata.query.filter_by(plan_id=plan.id).first()
+        payload = plan.to_dict(include_days=True, include_schedule=True)
+        if metadata:
+            payload.update(metadata.to_dict())
+        if plan.client:
+            payload["client"] = {
+                "id": plan.client.id,
+                "email": plan.client.email,
+                "profile": plan.client.profile.to_dict()
+                if plan.client.profile
+                else None,
+            }
+
         return success_response(
-            plan.to_dict(include_days=True), "Workout plan updated successfully", 200
+            payload,
+            "Workout plan updated successfully",
+            200,
         )
 
     except Exception as e:
@@ -983,7 +1212,9 @@ def workout_assignments():
             db.session.add(assignment)
             db.session.commit()
             return success_response(
-                assignment.to_dict(), "Workout assigned to calendar", 201
+                assignment.to_dict(include_plan=True, include_day=True),
+                "Workout assigned to calendar",
+                201,
             )
         except Exception as e:
             db.session.rollback()
@@ -1267,11 +1498,58 @@ def get_workout_calendar():
         # Active workout plans for this user
         plans = WorkoutPlan.query.filter_by(client_id=user_id, status="active").all()
 
+        explicit_assignments = (
+            WorkoutPlanAssignment.query.filter(
+                WorkoutPlanAssignment.user_id == user_id,
+                WorkoutPlanAssignment.assigned_date >= first_day,
+                WorkoutPlanAssignment.assigned_date <= last_day,
+            )
+            .order_by(WorkoutPlanAssignment.assigned_date, WorkoutPlanAssignment.id)
+            .all()
+        )
+
+        assignments_by_plan = {}
+        for assignment in explicit_assignments:
+            assignments_by_plan.setdefault(assignment.plan_id, []).append(assignment)
+
         # Auto-distribute workout days for plans that have a date range
         scheduled_days = []
         plans_without_dates = []
 
         for plan in plans:
+            plan_assignments = assignments_by_plan.get(plan.id, [])
+            if plan_assignments:
+                for assignment in plan_assignments:
+                    day = assignment.workout_day
+                    exercises = []
+                    if day:
+                        exercises = PlanExercise.query.filter_by(workout_day_id=day.id).all()
+                    scheduled_days.append(
+                        {
+                            "id": f"assignment-{assignment.id}",
+                            "plan_id": plan.id,
+                            "plan_name": plan.name,
+                            "plan_description": plan.description,
+                            "day_id": day.id if day else None,
+                            "day_name": day.name if day else None,
+                            "day_number": day.day_number if day else None,
+                            "day_notes": day.notes if day else None,
+                            "scheduled_date": assignment.assigned_date.isoformat(),
+                            "exercises": [
+                                {
+                                    "name": ex.exercise.name if ex.exercise else "Unknown",
+                                    "sets": ex.sets,
+                                    "reps": ex.reps,
+                                    "weight": ex.weight,
+                                    "rest_seconds": ex.rest_seconds,
+                                    "notes": ex.notes,
+                                }
+                                for ex in exercises
+                            ],
+                        }
+                    )
+                continue
+
             if not plan.start_date or not plan.end_date:
                 plans_without_dates.append(plan.to_dict())
                 continue
