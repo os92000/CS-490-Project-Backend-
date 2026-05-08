@@ -483,3 +483,54 @@ def test_update_my_coach_profile_missing_body(client, coach_headers):
         )
 
     assert response.status_code in [400, 500]
+
+
+def test_get_client_progress_requires_active_relationship(client, coach_headers):
+    with mock.patch("routes.coaches_routes.CoachRelationship.query") as rel_query:
+        rel_query.filter_by.return_value.first.return_value = None
+
+        response = client.get("/api/coaches/clients/9/progress", headers=coach_headers)
+
+    assert response.status_code == 403
+
+
+def test_get_client_progress_includes_progress_photos(client, coach_headers):
+    fake_relationship = mock.Mock()
+    fake_client = mock.Mock()
+    fake_client.to_dict.return_value = {"id": 9, "email": "client@test.com"}
+
+    fake_photo = mock.Mock()
+    fake_photo.to_dict.return_value = {
+        "id": 55,
+        "user_id": 9,
+        "photo_url": "/uploads/progress_photos/p55.jpg",
+        "category": "front",
+        "date": "2026-05-01",
+    }
+
+    with mock.patch("routes.coaches_routes.CoachRelationship.query") as rel_query, \
+         mock.patch("routes.coaches_routes.User.query") as user_query, \
+         mock.patch("routes.coaches_routes.FitnessSurvey.query") as survey_query, \
+         mock.patch("routes.coaches_routes.BodyMetric.query") as body_query, \
+         mock.patch("routes.coaches_routes.WellnessLog.query") as wellness_query, \
+         mock.patch("routes.coaches_routes.WorkoutLog.query") as workout_query, \
+         mock.patch("routes.coaches_routes.WorkoutPlan.query") as plan_query, \
+         mock.patch("routes.coaches_routes.MealLog.query") as meal_query, \
+         mock.patch("routes.coaches_routes.ProgressPhoto.query") as photo_query:
+
+        rel_query.filter_by.return_value.first.return_value = fake_relationship
+        user_query.get.return_value = fake_client
+        survey_query.filter_by.return_value.first.return_value = None
+        body_query.filter_by.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        wellness_query.filter_by.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        workout_query.filter_by.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        plan_query.filter_by.return_value.all.return_value = []
+        meal_query.filter_by.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        photo_query.filter_by.return_value.order_by.return_value.all.return_value = [fake_photo]
+
+        response = client.get("/api/coaches/clients/9/progress", headers=coach_headers)
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["data"]["progress_photos"][0]["category"] == "front"

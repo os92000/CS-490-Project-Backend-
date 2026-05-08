@@ -13,6 +13,7 @@ DROP TABLE IF EXISTS admin_audit_log;
 DROP TABLE IF EXISTS payment_methods;
 DROP TABLE IF EXISTS payments;
 DROP TABLE IF EXISTS mood_surveys;
+DROP TABLE IF EXISTS progress_photos;
 DROP TABLE IF EXISTS meal_plan_items;
 DROP TABLE IF EXISTS meal_plans;
 DROP TABLE IF EXISTS meals;
@@ -389,6 +390,19 @@ CREATE TABLE mood_surveys (
     UNIQUE KEY unique_user_date (user_id, log_date),
     INDEX idx_user_id (user_id),
     INDEX idx_log_date (log_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE progress_photos (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    photo_url VARCHAR(255) NOT NULL,
+    category ENUM('front', 'back', 'side', 'other') DEFAULT 'other',
+    notes TEXT,
+    date DATE,
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_progress_photos_user_id (user_id),
+    INDEX idx_progress_photos_date (date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

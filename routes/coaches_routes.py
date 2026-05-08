@@ -21,6 +21,7 @@ from models import (
     BodyMetric,
     WellnessLog,
     MealLog,
+    ProgressPhoto,
     CoachApplication,
     ModerationReport,
 )
@@ -1127,6 +1128,11 @@ def get_client_progress(client_id):
             .limit(120)
             .all()
         )
+        progress_photos = (
+            ProgressPhoto.query.filter_by(user_id=client_id)
+            .order_by(ProgressPhoto.date.desc(), ProgressPhoto.uploaded_at.desc())
+            .all()
+        )
 
         plans_data = []
         for plan in workout_plans:
@@ -1151,6 +1157,7 @@ def get_client_progress(client_id):
                 "body_metrics": [metric.to_dict() for metric in body_metrics],
                 "wellness_logs": [log.to_dict() for log in wellness_logs],
                 "meal_logs": [log.to_dict() for log in meal_logs],
+                "progress_photos": [photo.to_dict() for photo in progress_photos],
                 "workout_logs": [
                     log.to_dict(include_exercises=True) for log in workout_logs
                 ],

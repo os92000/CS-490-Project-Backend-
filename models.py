@@ -1177,6 +1177,42 @@ class BodyMetric(db.Model):
         return f"<BodyMetric user={self.user_id} date={self.date}>"
 
 
+class ProgressPhoto(db.Model):
+    """Progress photos uploaded by clients and visible to their active coach"""
+
+    __tablename__ = "progress_photos"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    photo_url = db.Column(db.String(255), nullable=False)
+    category = db.Column(
+        db.Enum("front", "back", "side", "other", name="progress_photo_categories"),
+        default="other",
+        nullable=False,
+    )
+    notes = db.Column(db.Text)
+    date = db.Column(db.Date)
+    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship("User", backref="progress_photos")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "photo_url": self.photo_url,
+            "category": self.category,
+            "notes": self.notes,
+            "date": self.date.isoformat() if self.date else None,
+            "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None,
+        }
+
+    def __repr__(self):
+        return f"<ProgressPhoto user={self.user_id} date={self.date}>"
+
+
 class WellnessLog(db.Model):
     """Daily wellness tracking (mood, sleep, etc.)"""
 

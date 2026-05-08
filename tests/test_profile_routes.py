@@ -1,4 +1,5 @@
 from io import BytesIO
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -212,3 +213,22 @@ def test_upload_profile_picture_success(client, auth_headers):
     assert response.status_code == 200
     assert fake_profile.profile_picture.replace("\\", "/") == "/uploads/profiles/avatar.png"
     session.commit.assert_called_once()
+
+
+def test_uploaded_file_route_serves_files(app, client):
+    uploads_dir = Path(app.root_path) / "uploads" / "profiles"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    file_path = uploads_dir / "avatar-test.txt"
+    file_path.write_text("hello uploads", encoding="utf-8")
+
+    try:
+        response = client.get("/uploads/profiles/avatar-test.txt")
+        assert response.status_code == 200
+        assert response.data == b"hello uploads"
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+        if file_path.exists():
+            file_path.unlink()

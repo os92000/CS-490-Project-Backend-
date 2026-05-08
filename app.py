@@ -1,5 +1,5 @@
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory, abort
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
@@ -42,6 +42,7 @@ def create_app(config_name=None):
     from routes.analytics_routes import analytics_bp
     from routes.admin_routes import admin_bp
     from routes.payments_routes import payments_bp
+    from routes.progress_photos_routes import progress_photos_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -54,6 +55,7 @@ def create_app(config_name=None):
     app.register_blueprint(analytics_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(payments_bp)
+    app.register_blueprint(progress_photos_bp)
 
     # Initialize WebSocket event handlers
     init_socketio_events(socketio)
@@ -128,6 +130,14 @@ def create_app(config_name=None):
             'error': None
         }), 200
 
+    @app.route('/uploads/<path:filename>', methods=['GET'])
+    def uploaded_file(filename):
+        uploads_root = os.path.join(app.root_path, 'uploads')
+        file_path = os.path.join(uploads_root, filename)
+        if not os.path.exists(file_path):
+            abort(404)
+        return send_from_directory(uploads_root, filename)
+
     # API root endpoint
     @app.route('/', methods=['GET'])
     def index():
@@ -147,7 +157,8 @@ def create_app(config_name=None):
                     'profile': '/api/profile',
                     'analytics': '/api/analytics',
                     'admin': '/api/admin',
-                    'payments': '/api/payments'
+                    'payments': '/api/payments',
+                    'progress_photos': '/api/progress-photos'
                 }
             },
             'message': 'Welcome to Fitness App API',
