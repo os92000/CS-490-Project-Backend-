@@ -1,7 +1,3 @@
-CLIENT_EMAIL = "client.john@fitapp.local"
-COACH_EMAIL = "coach.jane@fitapp.local"
-PASSWORD = "FitData2026!"
-SEED = 49026
 """
 Create one paired client and coach account with varied historical data.
 Usage:
@@ -894,4 +890,3 @@ if __name__ == "__main__":
     app = create_app()
     with app.app_context():
         main()
-
