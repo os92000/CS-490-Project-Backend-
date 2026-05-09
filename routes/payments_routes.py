@@ -1,8 +1,11 @@
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, User, CoachRelationship, CoachPricing
+from models import db, User, CoachRelationship, CoachPricing, PaymentRecord
 from utils.helpers import success_response, error_response
+from utils.validators import validate_card_info
 from datetime import datetime
+import secrets
+import json
 
 payments_bp = Blueprint('payments', __name__, url_prefix='/api/payments')
 
@@ -26,15 +29,61 @@ def process_payment():
     data = request.get_json()
 
     try:
-        # Mock payment processing - would integrate with Stripe/PayPal in production
-        # For now, just return success
+        # Minimal validation
+        if not data:
+            return error_response('Missing request body', 400)
+
+        amount = data.get('amount')
+        currency = data.get('currency', 'USD')
+        coach_id = data.get('coach_id')
+        card = data.get('card')
+
+        if amount is None:
+            return error_response('Amount is required', 400)
+        try:
+            amount = float(amount)
+        except Exception:
+            return error_response('Invalid amount', 400)
+        if amount <= 0:
+            return error_response('Amount must be positive', 400)
+
+        # Validate card details (mock - do not store sensitive data)
+        ok, card_meta = validate_card_info(card)
+        if not ok:
+            return error_response(f'Invalid card: {card_meta}', 400)
+
+        # Create a payment record (mock processing)
+        payment_reference = 'mock_' + secrets.token_hex(12)
+
+        metadata = {
+            'card': {
+                'brand': card_meta.get('brand'),
+                'last4': card_meta.get('last4'),
+                'exp_month': card_meta.get('exp_month'),
+                'exp_year': card_meta.get('exp_year'),
+            }
+        }
+        # Optional additional metadata from the request
+        for m in ('description', 'package'):
+            if m in data:
+                metadata[m] = data[m]
+
+        payment = PaymentRecord(
+            payer_id=user_id,
+            coach_id=coach_id,
+            payment_reference=payment_reference,
+            amount=amount,
+            currency=currency,
+            status='completed',
+            metadata_json=json.dumps(metadata),
+            created_at=datetime.utcnow(),
+        )
+        db.session.add(payment)
+        db.session.commit()
 
         return success_response({
-            'payment_id': 'mock_payment_' + str(datetime.now().timestamp()),
-            'status': 'completed',
-            'amount': data.get('amount', 0),
-            'currency': data.get('currency', 'USD')
-        }, 'Payment processed successfully', 200)
+            'payment': payment.to_dict()
+        }, 'Payment processed (mock) and recorded', 200)
     except Exception as e:
         return error_response('Payment processing failed', 500, str(e))
 
@@ -45,9 +94,13 @@ def payment_history():
     user_id = int(get_jwt_identity())
 
     try:
-        # Mock payment history - would fetch from payment provider in production
+        # Return payment records where user is payer or coach (received)
+        payments = PaymentRecord.query.filter(
+            db.or_(PaymentRecord.payer_id == user_id, PaymentRecord.coach_id == user_id)
+        ).order_by(PaymentRecord.created_at.desc()).all()
+
         return success_response({
-            'payments': []
+            'payments': [p.to_dict() for p in payments]
         }, 'Payment history retrieved', 200)
     except Exception as e:
         return error_response('Failed to retrieve payment history', 500, str(e))

@@ -1381,6 +1381,24 @@ class PaymentRecord(db.Model):
         except Exception:
             metadata = {}
 
+        # Build coach dict if exists
+        coach_dict = None
+        if self.coach:
+            coach_dict = {
+                "id": self.coach.id,
+                "email": self.coach.email,
+                "profile": self.coach.profile.to_dict() if self.coach.profile else None,
+            }
+
+        # Build payer/client dict if exists
+        client_dict = None
+        if self.payer:
+            client_dict = {
+                "id": self.payer.id,
+                "email": self.payer.email,
+                "profile": self.payer.profile.to_dict() if self.payer.profile else None,
+            }
+
         return {
             "id": self.id,
             "payer_id": self.payer_id,
@@ -1389,6 +1407,11 @@ class PaymentRecord(db.Model):
             "amount": float(self.amount) if self.amount else None,
             "currency": self.currency,
             "status": self.status,
-            "metadata": metadata,
+            "session_type": metadata.get("package"),
+            "description": metadata.get("description"),
+            "card": metadata.get("card"),
+            "paid_at": self.created_at.isoformat() if self.created_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            "coach": coach_dict,
+            "client": client_dict,
         }

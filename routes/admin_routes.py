@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from flask import Blueprint, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import func
@@ -17,6 +17,10 @@ from models import (
     ClientRequest,
     PaymentRecord,
     WorkoutTemplate,
+    WorkoutLog,
+    ChatMessage,
+    MealLog,
+    DailyMetric,
 )
 from utils.validators import is_valid_email, is_valid_password, is_valid_role, is_valid_fitness_level
 from utils.helpers import success_response, error_response
@@ -559,16 +563,152 @@ def update_request(request_id):
 def payment_analytics():
     """Return payment analytics"""
     try:
-        total_revenue = db.session.query(func.sum(PaymentRecord.amount)).filter_by(status='completed').scalar() or 0
-        payment_count = PaymentRecord.query.count()
-        payments = PaymentRecord.query.order_by(PaymentRecord.created_at.desc()).limit(20).all()
+        # Optional filters: start_date, end_date (YYYY-MM-DD), coach_id
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        coach_id = request.args.get('coach_id')
+
+        query = PaymentRecord.query
+
+        if coach_id:
+            try:
+                coach_id = int(coach_id)
+                query = query.filter_by(coach_id=coach_id)
+            except Exception:
+                return error_response('Invalid coach_id', 400)
+
+        if start_date:
+            try:
+                sd = datetime.fromisoformat(start_date)
+                query = query.filter(PaymentRecord.created_at >= sd)
+            except Exception:
+                return error_response('Invalid start_date format', 400)
+
+        if end_date:
+            try:
+                ed = datetime.fromisoformat(end_date)
+                query = query.filter(PaymentRecord.created_at <= ed)
+            except Exception:
+                return error_response('Invalid end_date format', 400)
+
+        total_revenue = db.session.query(func.sum(PaymentRecord.amount)).filter(PaymentRecord.status == 'completed')
+        # apply same filters to total_revenue
+        if coach_id:
+            total_revenue = total_revenue.filter(PaymentRecord.coach_id == coach_id)
+        if start_date:
+            total_revenue = total_revenue.filter(PaymentRecord.created_at >= sd)
+        if end_date:
+            total_revenue = total_revenue.filter(PaymentRecord.created_at <= ed)
+
+        total_revenue = total_revenue.scalar() or 0
+
+        payment_count = query.count()
+        payments = query.order_by(PaymentRecord.created_at.desc()).limit(50).all()
+
+        # Per-coach breakdown (top 10) when no coach_id filter is provided
+        coach_breakdown = []
+        if not coach_id:
+            rows = db.session.query(PaymentRecord.coach_id, func.sum(PaymentRecord.amount).label('revenue'))\
+                .filter(PaymentRecord.status == 'completed')\
+                .group_by(PaymentRecord.coach_id)\
+                .order_by(func.sum(PaymentRecord.amount).desc())\
+                .limit(10).all()
+            for cid, rev in rows:
+                coach_breakdown.append({'coach_id': cid, 'revenue': float(rev or 0)})
+
         return success_response({
             'total_revenue': float(total_revenue),
             'payment_count': payment_count,
-            'payments': [payment.to_dict() for payment in payments]
+            'payments': [payment.to_dict() for payment in payments],
+            'coach_breakdown': coach_breakdown,
         }, 'Payment analytics retrieved', 200)
     except Exception as e:
         return error_response('Failed to retrieve payment analytics', 500, str(e))
+
+
+@admin_bp.route('/engagement', methods=['GET'])
+@admin_required
+def engagement_report():
+    """Return engagement metrics and series: DAU/WAU/MAU and time series for 'day'/'week'/'month'."""
+    try:
+        period = request.args.get('period', 'day')  # day, week, month
+        # int param for how many periods to return
+        count = int(request.args.get('count', 30 if period == 'day' else 12))
+
+        today = datetime.utcnow().date()
+
+        def active_users_between(start_dt, end_dt):
+            ids = set()
+            # WorkoutLog.client_id by date
+            w = WorkoutLog.query.with_entities(WorkoutLog.client_id).filter(WorkoutLog.date >= start_dt, WorkoutLog.date < end_dt).all()
+            ids.update([r[0] for r in w if r[0] is not None])
+            # MealLog.user_id
+            m = MealLog.query.with_entities(MealLog.user_id).filter(MealLog.date >= start_dt, MealLog.date < end_dt).all()
+            ids.update([r[0] for r in m if r[0] is not None])
+            # DailyMetric.log_date
+            d = DailyMetric.query.with_entities(DailyMetric.user_id).filter(DailyMetric.log_date >= start_dt, DailyMetric.log_date < end_dt).all()
+            ids.update([r[0] for r in d if r[0] is not None])
+            # ChatMessage.sender_id (use sent_at range)
+            cm = ChatMessage.query.with_entities(ChatMessage.sender_id).filter(ChatMessage.sent_at >= start_dt, ChatMessage.sent_at < end_dt).all()
+            ids.update([r[0] for r in cm if r[0] is not None])
+            return ids
+
+        labels = []
+        values = []
+
+        if period == 'day':
+            for i in range(count - 1, -1, -1):
+                d = today - timedelta(days=i)
+                start = d
+                end = d + timedelta(days=1)
+                labels.append(d.isoformat())
+                values.append(len(active_users_between(start, end)))
+
+        elif period == 'week':
+            # weeks ending on today, each week is 7 days
+            for i in range(count - 1, -1, -1):
+                week_end = today - timedelta(days=i*7)
+                week_start = week_end - timedelta(days=6)
+                labels.append(f"{week_start.isoformat()} to {week_end.isoformat()}")
+                values.append(len(active_users_between(week_start, week_end + timedelta(days=1))))
+
+        elif period == 'month':
+            # approximate months by calendar months backwards
+            cur = today.replace(day=1)
+            months = []
+            for i in range(count - 1, -1, -1):
+                # move back i months
+                year = cur.year
+                month = cur.month - i
+                while month <= 0:
+                    month += 12
+                    year -= 1
+                start = date(year, month, 1)
+                if month == 12:
+                    end = date(year + 1, 1, 1)
+                else:
+                    end = date(year, month + 1, 1)
+                labels.append(start.strftime('%Y-%m'))
+                values.append(len(active_users_between(start, end)))
+        else:
+            return error_response('Invalid period', 400)
+
+        # Totals: DAU (today), WAU (last 7 days), MAU (last 30 days)
+        dau = len(active_users_between(today, today + timedelta(days=1)))
+        wau = len(active_users_between(today - timedelta(days=6), today + timedelta(days=1)))
+        mau = len(active_users_between(today - timedelta(days=29), today + timedelta(days=1)))
+
+        return success_response({
+            'labels': labels,
+            'values': values,
+            'dau': dau,
+            'wau': wau,
+            'mau': mau,
+            'period': period,
+        }, 'Engagement report retrieved', 200)
+
+    except Exception as e:
+        return error_response('Failed to retrieve engagement report', 500, str(e))
 
 
 @admin_bp.route('/templates', methods=['GET', 'PATCH'])
