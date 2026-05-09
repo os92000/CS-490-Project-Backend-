@@ -1,22 +1,11 @@
-
-
 CLIENT_EMAIL = "client.john@fitapp.local"
 COACH_EMAIL = "coach.jane@fitapp.local"
 PASSWORD = "FitData2026!"
 SEED = 49026
-
-
 """
 Create one paired client and coach account with varied historical data.
-
-
-
-
 Usage:
     python create_test_accounts.py
-
-
-
 
 What this script seeds:
 - 1 client account and 1 coach account
@@ -29,30 +18,18 @@ What this script seeds:
 - Daily metrics, body metrics, wellness logs, meal plans
 - Chat messages, reviews, notifications, payment records
 
-
-
-
 Date range:
 - Starts: 2025-01-01
 - Ends:   2026-05-09
 
-
-
-
 Re-running is safe: old dummy records for these emails are removed first.
 """
-
-
-
 
 from datetime import date, datetime, time, timedelta
 import json
 import math
 import random
 from sqlalchemy import MetaData, Table, inspect, text
-
-
-
 
 from app import create_app
 from models import (
@@ -86,44 +63,20 @@ from models import (
     WorkoutPlanMetadata,
 )
 
-
-
-
-
-
-
-
 CLIENT_EMAIL = "client.john@fitapp.local"
 COACH_EMAIL = "coach.jane@fitapp.local"
 PASSWORD = "FitData2026!"
 SEED = 49026
 
-
-
-
 START_DATE = date(2025, 1, 1)
 END_DATE = date(2026, 5, 9)
 HISTORY_DAYS = (END_DATE - START_DATE).days + 1
-
-
-
-
-
-
-
 
 def _daterange(start_date, end_date):
     current = start_date
     while current <= end_date:
         yield current
         current += timedelta(days=1)
-
-
-
-
-
-
-
 
 def _ensure_specializations():
     specs = [
@@ -133,23 +86,10 @@ def _ensure_specializations():
         ("Nutrition Coaching", "nutrition"),
     ]
 
-
-
-
     for name, category in specs:
         if not Specialization.query.filter_by(name=name).first():
             db.session.add(Specialization(name=name, category=category))
-
-
-
-
     db.session.commit()
-
-
-
-
-
-
 
 
 def _ensure_exercises():
@@ -172,15 +112,9 @@ def _ensure_exercises():
         ("Pick-up Basketball", "sports", "full-body", "ball", "intermediate", 360, 45),
     ]
 
-
-
-
     for name, category, muscle, equipment, difficulty, calories, duration in fallback_exercises:
         if Exercise.query.filter_by(name=name).first():
             continue
-
-
-
 
         db.session.add(
             Exercise(
@@ -198,31 +132,16 @@ def _ensure_exercises():
             )
         )
 
-
-
-
     db.session.commit()
-
-
-
-
-
-
 
 
 def _clear_existing_accounts(client_email, coach_email):
     client_user = User.query.filter_by(email=client_email).first()
     coach_user = User.query.filter_by(email=coach_email).first()
 
-
-
-
     user_ids = [u.id for u in (client_user, coach_user) if u]
     if not user_ids:
         return
-
-
-
 
     relationship_ids = [
         r.id
@@ -234,9 +153,6 @@ def _clear_existing_accounts(client_email, coach_email):
         ).all()
     ]
 
-
-
-
     plan_ids = [
         p.id
         for p in WorkoutPlan.query.filter(
@@ -244,57 +160,30 @@ def _clear_existing_accounts(client_email, coach_email):
         ).all()
     ]
 
-
-
-
     day_ids = []
     if plan_ids:
         day_ids = [d.id for d in WorkoutDay.query.filter(WorkoutDay.plan_id.in_(plan_ids)).all()]
 
-
-
-
     log_ids = [l.id for l in WorkoutLog.query.filter(WorkoutLog.client_id.in_(user_ids)).all()]
-
-
-
 
     if relationship_ids:
         ChatMessage.query.filter(ChatMessage.relationship_id.in_(relationship_ids)).delete(synchronize_session=False)
-
-
-
 
     ClientRequest.query.filter(
         db.or_(ClientRequest.client_id.in_(user_ids), ClientRequest.coach_id.in_(user_ids))
     ).delete(synchronize_session=False)
 
-
-
-
     Review.query.filter(
         db.or_(Review.client_id.in_(user_ids), Review.coach_id.in_(user_ids))
     ).delete(synchronize_session=False)
 
-
-
-
     if log_ids:
         ExerciseLog.query.filter(ExerciseLog.workout_log_id.in_(log_ids)).delete(synchronize_session=False)
 
-
-
-
     WorkoutLog.query.filter(WorkoutLog.client_id.in_(user_ids)).delete(synchronize_session=False)
-
-
-
 
     if day_ids:
         PlanExercise.query.filter(PlanExercise.workout_day_id.in_(day_ids)).delete(synchronize_session=False)
-
-
-
 
     if plan_ids:
         WorkoutPlanAssignment.query.filter(WorkoutPlanAssignment.plan_id.in_(plan_ids)).delete(
@@ -306,15 +195,9 @@ def _clear_existing_accounts(client_email, coach_email):
         WorkoutDay.query.filter(WorkoutDay.plan_id.in_(plan_ids)).delete(synchronize_session=False)
         WorkoutPlan.query.filter(WorkoutPlan.id.in_(plan_ids)).delete(synchronize_session=False)
 
-
-
-
     WorkoutPlanAssignment.query.filter(WorkoutPlanAssignment.user_id.in_(user_ids)).delete(
         synchronize_session=False
     )
-
-
-
 
     MealLog.query.filter(MealLog.user_id.in_(user_ids)).delete(synchronize_session=False)
     BodyMetric.query.filter(BodyMetric.user_id.in_(user_ids)).delete(synchronize_session=False)
@@ -324,43 +207,22 @@ def _clear_existing_accounts(client_email, coach_email):
     FitnessSurvey.query.filter(FitnessSurvey.user_id.in_(user_ids)).delete(synchronize_session=False)
     Notification.query.filter(Notification.user_id.in_(user_ids)).delete(synchronize_session=False)
 
-
-
-
     PaymentRecord.query.filter(
         db.or_(PaymentRecord.payer_id.in_(user_ids), PaymentRecord.coach_id.in_(user_ids))
     ).delete(synchronize_session=False)
-
-
-
 
     CoachAvailability.query.filter(CoachAvailability.coach_id.in_(user_ids)).delete(synchronize_session=False)
     CoachPricing.query.filter(CoachPricing.coach_id.in_(user_ids)).delete(synchronize_session=False)
     CoachSpecialization.query.filter(CoachSpecialization.coach_id.in_(user_ids)).delete(synchronize_session=False)
     CoachSurvey.query.filter(CoachSurvey.user_id.in_(user_ids)).delete(synchronize_session=False)
 
-
-
-
     if relationship_ids:
         CoachRelationship.query.filter(CoachRelationship.id.in_(relationship_ids)).delete(synchronize_session=False)
-
-
-
 
     UserProfile.query.filter(UserProfile.user_id.in_(user_ids)).delete(synchronize_session=False)
     User.query.filter(User.id.in_(user_ids)).delete(synchronize_session=False)
 
-
-
-
     db.session.commit()
-
-
-
-
-
-
 
 
 def _create_users_and_relationship(rng):
@@ -369,16 +231,10 @@ def _create_users_and_relationship(rng):
     db.session.add(coach)
     db.session.flush()
 
-
-
-
     client = User(email=CLIENT_EMAIL, role="client", status="active")
     client.set_password(PASSWORD)
     db.session.add(client)
     db.session.flush()
-
-
-
 
     db.session.add(
         UserProfile(
@@ -390,9 +246,6 @@ def _create_users_and_relationship(rng):
         )
     )
 
-
-
-
     db.session.add(
         UserProfile(
             user_id=client.id,
@@ -402,9 +255,6 @@ def _create_users_and_relationship(rng):
             bio="Client profile with long varied data history.",
         )
     )
-
-
-
 
     db.session.add(
         CoachSurvey(
@@ -416,17 +266,11 @@ def _create_users_and_relationship(rng):
         )
     )
 
-
-
-
     spec_names = ["Strength Training", "Weight Loss", "Nutrition Coaching", "Cardio Training"]
     for spec_name in spec_names:
         spec = Specialization.query.filter_by(name=spec_name).first()
         if spec:
             db.session.add(CoachSpecialization(coach_id=coach.id, specialization_id=spec.id))
-
-
-
 
     db.session.add_all(
         [
@@ -435,9 +279,6 @@ def _create_users_and_relationship(rng):
             CoachPricing(coach_id=coach.id, session_type="Nutrition Check-in", price=49.00, currency="USD"),
         ]
     )
-
-
-
 
     for day_of_week in [0, 1, 2, 3, 4]:
         db.session.add(
@@ -448,9 +289,6 @@ def _create_users_and_relationship(rng):
                 end_time=time(18, 0),
             )
         )
-
-
-
 
     request_date = datetime.combine(START_DATE + timedelta(days=5), time(10, 30))
     accepted_date = request_date + timedelta(days=1)
@@ -464,9 +302,6 @@ def _create_users_and_relationship(rng):
         )
     )
 
-
-
-
     relationship = CoachRelationship(
         client_id=client.id,
         coach_id=coach.id,
@@ -474,9 +309,6 @@ def _create_users_and_relationship(rng):
         start_date=datetime.combine(START_DATE + timedelta(days=8), time(9, 0)),
     )
     db.session.add(relationship)
-
-
-
 
     db.session.add(
         FitnessSurvey(
@@ -489,17 +321,8 @@ def _create_users_and_relationship(rng):
         )
     )
 
-
-
-
     db.session.commit()
     return client, coach, relationship
-
-
-
-
-
-
 
 
 def _build_plan_windows():
@@ -511,25 +334,13 @@ def _build_plan_windows():
     ]
 
 
-
-
-
-
-
-
 def _create_plans_and_logs(client, coach, rng):
     exercises = Exercise.query.order_by(Exercise.id.asc()).all()
     if len(exercises) < 8:
         raise RuntimeError("Need at least 8 exercises to generate dummy plans and logs")
 
-
-
-
     workout_log_count = 0
     exercise_log_count = 0
-
-
-
 
     for idx, (start, end, status) in enumerate(_build_plan_windows(), start=1):
         plan = WorkoutPlan(
@@ -544,9 +355,6 @@ def _create_plans_and_logs(client, coach, rng):
         db.session.add(plan)
         db.session.flush()
 
-
-
-
         db.session.add(
             WorkoutPlanMetadata(
                 plan_id=plan.id,
@@ -557,17 +365,11 @@ def _create_plans_and_logs(client, coach, rng):
             )
         )
 
-
-
-
         day_templates = [
             ("Day 1: Lower + Core", ["legs", "core"]),
             ("Day 2: Upper Strength", ["chest", "back", "shoulders"]),
             ("Day 3: Conditioning", ["full-body", "legs"]),
         ]
-
-
-
 
         plan_days = []
         for day_num, (day_name, muscles) in enumerate(day_templates, start=1):
@@ -581,18 +383,12 @@ def _create_plans_and_logs(client, coach, rng):
             db.session.flush()
             plan_days.append(day)
 
-
-
-
             candidates = [
                 ex for ex in exercises
                 if (ex.muscle_group in muscles) or (ex.category in ["cardio", "strength"])
             ]
             if len(candidates) < 3:
                 candidates = exercises
-
-
-
 
             for order, ex in enumerate(rng.sample(candidates, 3), start=1):
                 db.session.add(
@@ -609,9 +405,6 @@ def _create_plans_and_logs(client, coach, rng):
                     )
                 )
 
-
-
-
         assigned_cursor = start
         while assigned_cursor <= min(end, END_DATE):
             if assigned_cursor.weekday() in [0, 2, 4]:
@@ -626,18 +419,12 @@ def _create_plans_and_logs(client, coach, rng):
                 )
             assigned_cursor += timedelta(days=1)
 
-
-
-
         log_cursor = start
         while log_cursor <= min(end, END_DATE):
             day_map = {0: plan_days[0], 2: plan_days[1], 4: plan_days[2]}
             if log_cursor.weekday() not in day_map:
                 log_cursor += timedelta(days=1)
                 continue
-
-
-
 
             # Compliance changes over time so filter windows show visible shifts.
             days_from_start = (log_cursor - START_DATE).days
@@ -647,35 +434,20 @@ def _create_plans_and_logs(client, coach, rng):
                 base_compliance += 0.08
             do_log = rng.random() < min(base_compliance, 0.95)
 
-
-
-
             if do_log:
                 day = day_map[log_cursor.weekday()]
                 day_exercises = PlanExercise.query.filter_by(workout_day_id=day.id).order_by(PlanExercise.order.asc()).all()
                 lead_ex = day_exercises[0].exercise if day_exercises else None
-
-
-
 
                 # Duration and rating trend upward with periodic dips.
                 trend_minutes = 38 + int(22 * phase)
                 wave_minutes = int(8 * math.sin(days_from_start / 18.0))
                 duration = max(25, trend_minutes + wave_minutes + rng.randint(-7, 9))
 
-
-
-
                 base_rating = 2.8 + (1.5 * phase) + (0.35 * math.sin(days_from_start / 30.0))
                 rating = int(round(max(1, min(5, base_rating + rng.uniform(-0.7, 0.7)))))
 
-
-
-
                 calories_burned = max(180, int(duration * (5.5 + rng.uniform(-1.0, 1.2))))
-
-
-
 
                 log = WorkoutLog(
                     client_id=client.id,
@@ -696,9 +468,6 @@ def _create_plans_and_logs(client, coach, rng):
                 db.session.flush()
                 workout_log_count += 1
 
-
-
-
                 for pe in day_exercises:
                     ex = pe.exercise
                     if ex and ex.category == "strength":
@@ -712,9 +481,6 @@ def _create_plans_and_logs(client, coach, rng):
                         weight_used = "bodyweight"
                         duration_minutes = rng.randint(12, 28)
 
-
-
-
                     db.session.add(
                         ExerciseLog(
                             workout_log_id=log.id,
@@ -727,9 +493,6 @@ def _create_plans_and_logs(client, coach, rng):
                         )
                     )
                     exercise_log_count += 1
-
-
-
 
             # Occasional ad-hoc cardio session.
             if rng.random() < 0.12:
@@ -756,33 +519,15 @@ def _create_plans_and_logs(client, coach, rng):
                     )
                     workout_log_count += 1
 
-
-
-
             log_cursor += timedelta(days=1)
 
-
-
-
         db.session.commit()
-
-
-
 
     return workout_log_count, exercise_log_count
 
 
-
-
-
-
-
-
 def _daily_macro_targets(days_from_start):
     phase = days_from_start / max(HISTORY_DAYS - 1, 1)
-
-
-
 
     # Intake becomes more consistent and slightly lower through time.
     seasonal = math.sin(days_from_start / 27.0)
@@ -790,9 +535,6 @@ def _daily_macro_targets(days_from_start):
     protein = int(135 + (45 * phase) + (12 * math.sin(days_from_start / 40.0)))
     carbs = int(330 - (75 * phase) + (30 * math.sin(days_from_start / 17.0)))
     fat = int(88 - (18 * phase) + (10 * math.sin(days_from_start / 23.0)))
-
-
-
 
     return {
         "calories": max(1650, calories),
@@ -802,28 +544,16 @@ def _daily_macro_targets(days_from_start):
     }
 
 
-
-
-
-
-
-
 def _create_nutrition_and_wellness(client, rng):
     meal_count = 0
     daily_metric_count = 0
     wellness_count = 0
     body_metric_count = 0
 
-
-
-
     metadata = MetaData()
     daily_metrics_table = Table("daily_metrics", metadata, autoload_with=db.engine)
     daily_metric_cols = set(daily_metrics_table.c.keys())
     daily_metric_date_col = "log_date" if "log_date" in daily_metric_cols else "date"
-
-
-
 
     meal_templates = {
         "breakfast": [
@@ -852,37 +582,22 @@ def _create_nutrition_and_wellness(client, rng):
         ],
     }
 
-
-
-
     # Meal logs for the most recent ~13 months so nutrition filters are rich but bounded.
     nutrition_start = END_DATE - timedelta(days=400)
-
-
-
 
     for day in _daterange(nutrition_start, END_DATE):
         days_from_start = (day - START_DATE).days
         weekday = day.weekday()
         targets = _daily_macro_targets(days_from_start)
 
-
-
-
         # Weekends tend to be a bit higher in calories.
         if weekday in [5, 6]:
             targets["calories"] += 120
             targets["carbs"] += 20
 
-
-
-
         meals_today = ["breakfast", "lunch", "dinner"]
         if rng.random() < 0.68:
             meals_today.append("snack")
-
-
-
 
         split = {
             "breakfast": 0.24,
@@ -891,17 +606,11 @@ def _create_nutrition_and_wellness(client, rng):
             "snack": 0.10,
         }
 
-
-
-
         for meal_type in meals_today:
             cal = int(targets["calories"] * split[meal_type] + rng.randint(-70, 90))
             pro = round(max(8, targets["protein"] * split[meal_type] + rng.uniform(-4, 5)), 2)
             carb = round(max(8, targets["carbs"] * split[meal_type] + rng.uniform(-8, 9)), 2)
             fat = round(max(4, targets["fat"] * split[meal_type] + rng.uniform(-3, 3)), 2)
-
-
-
 
             db.session.add(
                 MealLog(
@@ -918,22 +627,13 @@ def _create_nutrition_and_wellness(client, rng):
             )
             meal_count += 1
 
-
-
-
     # Daily metrics and wellness across full range.
     for idx, day in enumerate(_daterange(START_DATE, END_DATE)):
         phase = idx / max(HISTORY_DAYS - 1, 1)
 
-
-
-
         steps = int(6400 + 2500 * phase + 1700 * math.sin(idx / 21.0) + rng.randint(-1300, 1500))
         calories_burned = int(1850 + 300 * phase + 180 * math.sin(idx / 19.0) + rng.randint(-180, 220))
         water_ml = int(1900 + 520 * phase + 230 * math.sin(idx / 16.0) + rng.randint(-260, 320))
-
-
-
 
         daily_metric_row = {
             "user_id": client.id,
@@ -947,17 +647,11 @@ def _create_nutrition_and_wellness(client, rng):
         db.session.execute(daily_metrics_table.insert().values(**daily_metric_row))
         daily_metric_count += 1
 
-
-
-
         # Wellness 6 days a week to keep data dense but not perfectly complete.
         if day.weekday() != 6 or rng.random() < 0.45:
             sleep_hours = round(6.5 + 0.9 * phase + 0.45 * math.sin(idx / 25.0) + rng.uniform(-0.7, 0.8), 2)
             energy = int(5.2 + 2.8 * phase + rng.uniform(-1.2, 1.3))
             stress = int(6.2 - 2.1 * phase + rng.uniform(-1.4, 1.4))
-
-
-
 
             if sleep_hours >= 8.0:
                 sleep_quality = "excellent"
@@ -972,14 +666,8 @@ def _create_nutrition_and_wellness(client, rng):
                 sleep_quality = "poor"
                 mood = "poor"
 
-
-
-
             if rng.random() < 0.05:
                 mood = "terrible"
-
-
-
 
             db.session.add(
                 WellnessLog(
@@ -996,16 +684,10 @@ def _create_nutrition_and_wellness(client, rng):
             )
             wellness_count += 1
 
-
-
-
         # Body metrics once per week.
         if day.weekday() == 0:
             weight = round(99.2 - 12.4 * phase + 0.8 * math.sin(idx / 33.0) + rng.uniform(-0.5, 0.45), 2)
             body_fat = round(30.6 - 6.8 * phase + rng.uniform(-0.3, 0.3), 2)
-
-
-
 
             db.session.add(
                 BodyMetric(
@@ -1024,9 +706,6 @@ def _create_nutrition_and_wellness(client, rng):
             )
             body_metric_count += 1
 
-
-
-
     # Personal meal plan notes users can edit in-app.
     plan_titles = [
         "High Protein Weekday Plan",
@@ -1036,16 +715,10 @@ def _create_nutrition_and_wellness(client, rng):
         "Low Prep Busy Week Plan",
     ]
 
-
-
-
     meal_plan_columns = {column["name"] for column in inspect(db.engine).get_columns("meal_plans")}
     meal_plan_title_column = "name" if "name" in meal_plan_columns else "title" if "title" in meal_plan_columns else None
     if meal_plan_title_column is None:
         raise RuntimeError("meal_plans table is missing both 'name' and 'title' columns")
-
-
-
 
     for title in plan_titles:
         values = {
@@ -1061,13 +734,7 @@ def _create_nutrition_and_wellness(client, rng):
             values,
         )
 
-
-
-
     db.session.commit()
-
-
-
 
     return {
         "meal_logs": meal_count,
@@ -1078,18 +745,9 @@ def _create_nutrition_and_wellness(client, rng):
     }
 
 
-
-
-
-
-
-
 def _create_social_and_payment_data(client, coach, relationship, rng):
     end_dt = datetime.combine(END_DATE, time(18, 0))
     start_dt = datetime.combine(START_DATE, time(9, 0))
-
-
-
 
     chat_count = 0
     weeks = max(1, HISTORY_DAYS // 7)
@@ -1099,17 +757,11 @@ def _create_social_and_payment_data(client, coach, relationship, rng):
             if sent_at > end_dt:
                 continue
 
-
-
-
             sender_id = client.id if msg_idx == 0 else coach.id
             if sender_id == client.id:
                 text = f"Weekly check-in {week + 1}: workouts logged, nutrition mostly on target, energy improving."
             else:
                 text = f"Coach reply {week + 1}: keep consistency, adjust load gradually, and prioritize sleep this week."
-
-
-
 
             db.session.add(
                 ChatMessage(
@@ -1122,17 +774,11 @@ def _create_social_and_payment_data(client, coach, relationship, rng):
             )
             chat_count += 1
 
-
-
-
     review_payloads = [
         (5, "Great coaching support and clear progress structure."),
         (5, "Very responsive coach with practical plan adjustments."),
         (4, "Strong guidance and realistic recommendations for busy weeks."),
     ]
-
-
-
 
     review_count = 0
     for idx, (rating, comment) in enumerate(review_payloads):
@@ -1147,17 +793,11 @@ def _create_social_and_payment_data(client, coach, relationship, rng):
         )
         review_count += 1
 
-
-
-
     notification_count = 0
     for i in range(70):
         created_at = end_dt - timedelta(days=i * 7)
         if created_at < start_dt:
             break
-
-
-
 
         milestone = i % 4 == 0
         db.session.add(
@@ -1176,17 +816,11 @@ def _create_social_and_payment_data(client, coach, relationship, rng):
         )
         notification_count += 1
 
-
-
-
     payment_count = 0
     for i in range(18):
         created_at = end_dt - timedelta(days=i * 28 + 3)
         if created_at < start_dt:
             break
-
-
-
 
         amount = 299.00 if i % 3 != 0 else 89.00
         metadata = {
@@ -1194,9 +828,6 @@ def _create_social_and_payment_data(client, coach, relationship, rng):
             "seed_tag": "dummy_account",
             "index": i,
         }
-
-
-
 
         db.session.add(
             PaymentRecord(
@@ -1212,13 +843,7 @@ def _create_social_and_payment_data(client, coach, relationship, rng):
         )
         payment_count += 1
 
-
-
-
     db.session.commit()
-
-
-
 
     return {
         "chat_messages": chat_count,
@@ -1228,48 +853,27 @@ def _create_social_and_payment_data(client, coach, relationship, rng):
     }
 
 
-
-
-
-
-
-
 def main():
     rng = random.Random(SEED)
-
-
-
 
     print("=" * 72)
     print("Seeding paired coach-client data")
     print("=" * 72)
     print(f"Range: {START_DATE.isoformat()} to {END_DATE.isoformat()}")
 
-
-
-
     _ensure_specializations()
     _ensure_exercises()
     _clear_existing_accounts(CLIENT_EMAIL, COACH_EMAIL)
-
-
-
 
     client, coach, relationship = _create_users_and_relationship(rng)
     workout_logs, exercise_logs = _create_plans_and_logs(client, coach, rng)
     nutrition_counts = _create_nutrition_and_wellness(client, rng)
     social_counts = _create_social_and_payment_data(client, coach, relationship, rng)
 
-
-
-
     print("\nAccounts")
     print(f"  Client:   {CLIENT_EMAIL}")
     print(f"  Coach:    {COACH_EMAIL}")
     print(f"  Password: {PASSWORD}")
-
-
-
 
     print("\nSeed summary")
     print(f"  Workout logs: {workout_logs}")
@@ -1286,21 +890,8 @@ def main():
     print("=" * 72)
 
 
-
-
-
-
-
-
 if __name__ == "__main__":
     app = create_app()
     with app.app_context():
         main()
-
-
-
-
-
-
-
 
