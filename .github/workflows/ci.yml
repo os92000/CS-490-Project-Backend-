@@ -68,5 +68,15 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 5
-          curl -kfsS https://localhost:5000/health
+          cd ~/fitness-app
+          for i in $(seq 1 20); do
+            if docker compose --profile test exec -T backend_test \
+                 curl -fsS http://localhost:5000/health; then
+              exit 0
+            fi
+            echo "Health check attempt $i failed; retrying in 3s..."
+            sleep 3
+          done
+          echo "Health check failed after 20 attempts. Recent backend logs:"
+          docker compose --profile test logs --tail=100 backend_test
+          exit 1
