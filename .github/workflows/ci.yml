@@ -1,4 +1,4 @@
-name: FitApp Backend CI/CD
+name: FitApp Backend CI/CD 
 
 on:
   push:
